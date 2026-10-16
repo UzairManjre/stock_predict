@@ -522,6 +522,10 @@ def main():
             import matplotlib.pyplot as plt
             figs = best_tft.plot_interpretation(interpretation)
             interp_dir = os.path.join(os.path.dirname(__file__), '..', 'artifacts', 'interpretation')
+            if args.experiment:
+                # Experiments must not overwrite the plots of the registered model
+                run_name = os.path.basename(os.path.dirname(os.path.dirname(best_model_path)))
+                interp_dir = os.path.join(os.path.dirname(__file__), '..', 'results', 'tft_experiments', run_name)
             os.makedirs(interp_dir, exist_ok=True)
             for name, fig in figs.items():
                 out_path = os.path.join(interp_dir, f'{name}.png')

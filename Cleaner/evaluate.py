@@ -231,6 +231,8 @@ def main():
     parser.add_argument('--horizons', type=int, nargs='+', default=[5, 10, 21])
     parser.add_argument('--windows', type=int, default=6)
     parser.add_argument('--window-size', type=int, default=63)
+    parser.add_argument('--save-predictions', action='store_true',
+                        help="Also save every model's test-window scores (for ensemble experiments)")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -243,7 +245,7 @@ def main():
     print(f"{len(df)} rows, {df['ticker'].nunique()} stocks, {len(sessions)} sessions "
           f"({pd.Timestamp(sessions[0]).date()} to {pd.Timestamp(sessions[-1]).date()})")
 
-    metric_rows, ic_rows, backtest_frames, window_rows = [], [], [], []
+    metric_rows, ic_rows, backtest_frames, window_rows, prediction_frames = [], [], [], [], []
     for h in args.horizons:
         target = f'target_{h}d'
         for w in make_windows(sessions, args.windows, args.window_size, h):
@@ -279,6 +281,14 @@ def main():
                 candidates['Rank regression, factors only'] = (None, None, None, rank_reg_factors)
                 candidates['LambdaRank'] = (None, None, None, lambda_rank)
                 candidates['Factor composite'] = (None, None, None, factor_composite(test))
+            if args.save_predictions:
+                scores = {name: (score if score is not None else q50) for name, (_, q50, _, score) in candidates.items()
+                          if name != 'Predict zero'}
+                prediction_frames.append(pd.DataFrame({
+                    'horizon': h, 'window': w['window'], 'date': dates, 'ticker': test['ticker'].astype(str).values,
+                    'target': y, 'fwd_raw_5d': test['fwd_raw_5d'].values, 'fwd_nifty_5d': test['fwd_nifty_5d'].values,
+                    **scores}))
+
             for name, (q10, q50, q90, score) in candidates.items():
                 row = {'horizon': h, 'window': w['window'], 'model': name, 'n': len(y)}
                 if q50 is not None:
@@ -303,6 +313,9 @@ def main():
                     frame['score:LambdaRank top 20'] = candidates['LambdaRank'][3]
                     frame['score:Factor composite top 20'] = candidates['Factor composite'][3]
                 backtest_frames.append(frame)
+
+    if prediction_frames:
+        pd.concat(prediction_frames, ignore_index=True).to_parquet(os.path.join(args.out, 'test_predictions.parquet'), index=False)
 
     metrics = pd.DataFrame(metric_rows)
     ics = pd.concat(ic_rows, ignore_index=True) if ic_rows else pd.DataFrame()

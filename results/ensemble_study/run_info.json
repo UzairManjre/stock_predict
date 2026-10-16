@@ -1,0 +1,9 @@
+{
+  "parquet": "training_data\\processed_features.parquet",
+  "horizons": [
+    5
+  ],
+  "windows": 6,
+  "window_size": 63,
+  "generated_at": "2026-10-16T23:59:37"
+}
