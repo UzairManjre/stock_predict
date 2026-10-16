@@ -128,6 +128,20 @@ CREATE TABLE IF NOT EXISTS prediction_accuracy_summary (
     evaluated_at            TIMESTAMP DEFAULT NOW()
 );
 
+-- Headline metric: did the batch's top 20 by 12-1 month momentum beat the average stock / the NIFTY?
+CREATE TABLE IF NOT EXISTS headline_hit_rates (
+    batch_date      DATE NOT NULL,
+    horizon_days    INT NOT NULL,
+    generated_at    TIMESTAMP,
+    stocks          INT,
+    top20_excess    FLOAT,
+    avg_excess      FLOAT,
+    beat_average    SMALLINT,
+    beat_nifty      SMALLINT,
+    evaluated_at    TIMESTAMP DEFAULT NOW(),
+    UNIQUE (batch_date, horizon_days)
+);
+
 CREATE INDEX IF NOT EXISTS idx_pred_acc_batch   ON prediction_accuracy(batch_date);
 CREATE INDEX IF NOT EXISTS idx_pred_acc_ticker  ON prediction_accuracy(ticker);
 """
@@ -368,6 +382,91 @@ def evaluate_batch(batch_df: pd.DataFrame, conn) -> tuple:
     return row_records, summary
 
 
+# ─── Headline hit rates ───────────────────────────────────────────────────────
+HEADLINE_HORIZONS = (5, 21)
+TOP_N = 20
+
+
+def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
+    """For each day's latest prediction batch, once `h` sessions have passed: did the top 20 stocks
+    by momentum rank beat the average stock and the NIFTY 50 (excess log return > 0)?"""
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT p.generated_at, p.ticker, p.momentum_rank
+        FROM predictions p
+        JOIN (SELECT generated_at::date AS d, MAX(generated_at) AS latest
+              FROM predictions WHERE horizon = '5d' AND momentum_rank IS NOT NULL
+              GROUP BY generated_at::date) b ON p.generated_at = b.latest
+        WHERE p.horizon = '5d' AND p.momentum_rank IS NOT NULL
+    """)
+    preds = pd.DataFrame(cur.fetchall())
+    cur.execute("SELECT batch_date, horizon_days FROM headline_hit_rates")
+    done = {(r['batch_date'], r['horizon_days']) for r in cur.fetchall()}
+    cur.close()
+    if preds.empty:
+        return 0
+
+    written = 0
+    for gen_at, batch in preds.groupby('generated_at'):
+        batch_date = pd.Timestamp(gen_at).date()
+        todo = [h for h in horizons if (batch_date, h) not in done]
+        if not todo:
+            continue
+        tickers = batch['ticker'].tolist()
+        prices = load_price_around(conn, tickers + ['NIFTY50'], batch_date - timedelta(days=7),
+                                   batch_date + timedelta(days=2 * max(todo) + 14))
+        if prices.empty:
+            continue
+        prices['date'] = pd.to_datetime(prices['date'])
+        pivot = prices.pivot(index='date', columns='ticker', values='adj_close').astype(float).sort_index()
+        for h in todo:
+            nifty_base, nifty_end = get_nth_trading_day_price(pivot, 'NIFTY50', batch_date, n=h)
+            if nifty_base is None:
+                continue                      # not enough sessions yet; retried on a later run
+            nifty_ret = np.log(nifty_end / nifty_base)
+            rows = []
+            for r in batch.itertuples(index=False):
+                base, end = get_nth_trading_day_price(pivot, r.ticker, batch_date, n=h)
+                if base is not None:
+                    rows.append({'ticker': r.ticker, 'rank': r.momentum_rank, 'excess': np.log(end / base) - nifty_ret})
+            frame = pd.DataFrame(rows)
+            if len(frame) < 2 * TOP_N:
+                continue
+            top = frame.sort_values(['rank', 'ticker']).head(TOP_N)['excess'].mean()
+            avg = frame['excess'].mean()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO headline_hit_rates (batch_date, horizon_days, generated_at, stocks, top20_excess,
+                                                avg_excess, beat_average, beat_nifty)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (batch_date, horizon_days) DO NOTHING
+            """, (batch_date, h, gen_at, len(frame), float(top), float(avg), int(top > avg), int(top > 0)))
+            conn.commit()
+            cur.close()
+            written += 1
+    return written
+
+
+def print_headline_report(conn):
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT horizon_days, COUNT(*) AS batches, AVG(beat_average::float) AS beat_avg,
+               AVG(beat_nifty::float) AS beat_nifty, AVG(top20_excess - avg_excess) AS edge
+        FROM headline_hit_rates GROUP BY horizon_days ORDER BY horizon_days
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    print("\n  HEADLINE: how often the top 20 momentum picks beat the market (live)")
+    if not rows:
+        print("  No batch has completed its horizon yet.")
+        return
+    print(f"  {'Horizon':<10} {'Batches':>8} {'Beat avg stock':>15} {'Beat NIFTY':>11} {'Avg edge':>9}")
+    for r in rows:
+        print(f"  {str(r['horizon_days']) + ' days':<10} {r['batches']:>8} {r['beat_avg']:>15.1%} "
+              f"{r['beat_nifty']:>11.1%} {r['edge'] * 100:>8.2f}%")
+    print("  Backtest reference, 2021-2026: 21 days beat the average stock 65%, the NIFTY 69% of start days.")
+
+
 # ─── DB Write ─────────────────────────────────────────────────────────────────
 def write_accuracy_rows(conn, rows: list):
     if not rows:
@@ -542,6 +641,7 @@ def print_accuracy_report(conn):
         print(f"  Buy Signal Hit Rate          : {agg['buy_hit_rate']:.1%}" if agg['buy_hit_rate'] else "  Buy Signal Hit Rate          : N/A")
     else:
         print("  No evaluated predictions yet.")
+    print_headline_report(conn)
 
     print(f"\n{'-' * 70}")
     print(f"  {'Batch Date':<12} {'N':>5} {'MAE':>8} {'RMSE':>8} {'Dir%':>7} {'Q-Cov':>7} {'Top10':>8} {'NIFTY':>8}")
@@ -558,6 +658,9 @@ def print_accuracy_report(conn):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
+    # The report prints ≈ and –, which a piped Windows console (cp1252) cannot encode
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
     parser = argparse.ArgumentParser(description="TFT Prediction Accuracy Checker")
     parser.add_argument('--min-days', type=int, default=7,
                         help='Minimum calendar days after prediction before evaluating (default: 7)')
@@ -572,6 +675,10 @@ def main():
     print(f"Connecting to {DB_CFG['database']}@{DB_CFG['host']}:{DB_CFG['port']}...")
     conn = psycopg2.connect(**DB_CFG)
     ensure_tables(conn)
+
+    if not args.report_only:
+        n = evaluate_headline_hits(conn)
+        print(f"Headline hit rates: {n} new batch-horizon result(s).")
 
     if args.report_only:
         print_accuracy_report(conn)

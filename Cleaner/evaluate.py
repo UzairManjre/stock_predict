@@ -13,12 +13,14 @@ covering the most recent ~18 months):
     12-1 month momentum and 1-month reversal (ranking scores only, for IC and backtests)
 
 Metrics per window, horizon and model: MAE of the median, pinball loss, q10-q90 coverage,
-direction accuracy, daily cross-sectional rank IC, and the top-minus-bottom decile spread.
-IC t-stats use one session every `horizon` sessions so overlapping targets don't inflate them.
+direction accuracy, daily cross-sectional rank IC, the top-minus-bottom decile spread, and the
+headline hit rates: how often the model's top 20 beat the average stock (hit_vs_avg) and the
+NIFTY 50 (hit_vs_nifty) over the horizon. IC t-stats use one session every `horizon` sessions so
+overlapping targets don't inflate them; hit_periods counts those non-overlapping periods.
 
-Backtest (5-day horizon): every 5th session buy the top 20 stocks by score, equal weight,
-hold 5 sessions, pay 0.18% round trip on the names replaced. Compared with the NIFTY 50 and an
-equal-weight portfolio of all stocks.
+Backtests (5- and 21-day horizons): every `horizon` sessions buy the top 20 stocks by score,
+equal weight, hold `horizon` sessions, pay 0.18% round trip on the names replaced. Compared with
+the NIFTY 50 and an equal-weight portfolio of all stocks.
 
 Outputs go to results/ (CSV + PNG). Usage:
     python Cleaner/evaluate.py [--horizons 5 10 21] [--windows 6] [--window-size 63]
@@ -77,9 +79,11 @@ def load_data(path, horizons):
     # Ranking-only baselines (known at t): 12-1 month momentum and 1-month reversal
     df['score_momentum_12_1'] = np.log(g['adj_close'].shift(21) / g['adj_close'].shift(252))
     df['score_reversal_1m'] = -df['log_return_21d']
-    # Realized forward 5-day raw return, for the backtest
-    df['fwd_raw_5d'] = g['log_return_5d'].shift(-5)
-    df['fwd_nifty_5d'] = df.groupby('ticker', observed=True)['nifty_5d_return'].shift(-5)
+    # Realized forward raw returns, for the backtests
+    for h in sorted(set(horizons) | {5}):
+        if f'log_return_{h}d' in df.columns and f'nifty_{h}d_return' in df.columns:
+            df[f'fwd_raw_{h}d'] = g[f'log_return_{h}d'].shift(-h)
+            df[f'fwd_nifty_{h}d'] = g[f'nifty_{h}d_return'].shift(-h)
     if has_factor_features(df):
         df = add_cross_sectional_ranks(df, horizons)
     return df
@@ -156,6 +160,17 @@ def decile_spread(dates, score, actual, min_stocks=20):
     return (top - bottom).dropna()
 
 
+def top_n_hits(dates, score, actual, n=TOP_N, min_stocks=2 * TOP_N):
+    """Per date: did the top-n stocks by score beat the average stock, and the NIFTY (excess > 0)?
+    Ties are broken by row order (ticker), so reruns pick the same stocks."""
+    frame = pd.DataFrame({'date': dates, 's': score, 'y': actual}).dropna()
+    frame = frame[frame.groupby('date')['s'].transform('size') >= min_stocks]
+    frame['r'] = frame.groupby('date')['s'].rank(ascending=False, method='first')
+    top = frame[frame['r'] <= n].groupby('date')['y'].mean()
+    avg = frame.groupby('date')['y'].mean().loc[top.index]
+    return pd.DataFrame({'hit_vs_avg': (top > avg).astype(float), 'hit_vs_nifty': (top > 0).astype(float)})
+
+
 def non_overlapping(series, step):
     """Every `step`-th session, so samples don't share target days."""
     return series.iloc[::step]
@@ -176,30 +191,33 @@ def point_metrics(y, q10, q50, q90):
 def ranking_metrics(dates, score, y, step):
     ic = daily_rank_ic(dates, score, y)
     spread = decile_spread(dates, score, y)
+    hits = top_n_hits(dates, score, y)
     return {'mean_ic': float(ic.mean()) if len(ic) else np.nan,
-            'decile_spread': float(non_overlapping(spread, step).mean()) if len(spread) else np.nan}, ic, spread
+            'decile_spread': float(non_overlapping(spread, step).mean()) if len(spread) else np.nan,
+            'hit_vs_avg': float(hits['hit_vs_avg'].mean()) if len(hits) else np.nan,
+            'hit_vs_nifty': float(hits['hit_vs_nifty'].mean()) if len(hits) else np.nan}, ic, spread, hits
 
 
 # ─── Backtest ─────────────────────────────────────────────────────────────────
 
-def backtest(scores, step=5):
-    """scores: DataFrame [date, ticker, fwd_raw_5d, fwd_nifty_5d, <score columns>]."""
+def backtest(scores, step=5, ret='fwd_raw_5d', nifty='fwd_nifty_5d'):
+    """scores: DataFrame [date, ticker, <ret>, <nifty>, <score columns>]; rebalanced every `step` sessions."""
     rebalance_dates = sorted(scores['date'].unique())[::step]
     strategies = [c for c in scores.columns if c.startswith('score:')]
     rows, held = [], {s: set() for s in strategies}
     for d in rebalance_dates:
-        day = scores[scores['date'] == d].dropna(subset=['fwd_raw_5d'])
+        day = scores[scores['date'] == d].dropna(subset=[ret])
         if len(day) < TOP_N * 2:
             continue
         row = {'date': d,
-               'NIFTY 50': float(np.expm1(day['fwd_nifty_5d'].iloc[0])),
-               'Equal weight, all stocks': float(np.expm1(day['fwd_raw_5d']).mean())}
+               'NIFTY 50': float(np.expm1(day[nifty].iloc[0])),
+               'Equal weight, all stocks': float(np.expm1(day[ret]).mean())}
         for s in strategies:
             picks = day.dropna(subset=[s]).nlargest(TOP_N, s)
             new = set(picks['ticker'])
             turnover = len(new - held[s]) / TOP_N if held[s] else 1.0
             held[s] = new
-            row[s.replace('score:', '')] = float(np.expm1(picks['fwd_raw_5d']).mean() - turnover * ROUND_TRIP_COST)
+            row[s.replace('score:', '')] = float(np.expm1(picks[ret]).mean() - turnover * ROUND_TRIP_COST)
             row[s.replace('score:', '') + ' turnover'] = turnover
         rows.append(row)
     return pd.DataFrame(rows)
@@ -245,7 +263,8 @@ def main():
     print(f"{len(df)} rows, {df['ticker'].nunique()} stocks, {len(sessions)} sessions "
           f"({pd.Timestamp(sessions[0]).date()} to {pd.Timestamp(sessions[-1]).date()})")
 
-    metric_rows, ic_rows, backtest_frames, window_rows, prediction_frames = [], [], [], [], []
+    metric_rows, ic_rows, hit_rows, window_rows, prediction_frames = [], [], [], [], []
+    backtest_frames = {}
     for h in args.horizons:
         target = f'target_{h}d'
         for w in make_windows(sessions, args.windows, args.window_size, h):
@@ -284,26 +303,28 @@ def main():
             if args.save_predictions:
                 scores = {name: (score if score is not None else q50) for name, (_, q50, _, score) in candidates.items()
                           if name != 'Predict zero'}
+                fwd = {c: test[c].values for c in dict.fromkeys(['fwd_raw_5d', 'fwd_nifty_5d', f'fwd_raw_{h}d', f'fwd_nifty_{h}d'])
+                       if c in test.columns}
                 prediction_frames.append(pd.DataFrame({
                     'horizon': h, 'window': w['window'], 'date': dates, 'ticker': test['ticker'].astype(str).values,
-                    'target': y, 'fwd_raw_5d': test['fwd_raw_5d'].values, 'fwd_nifty_5d': test['fwd_nifty_5d'].values,
-                    **scores}))
+                    'target': y, **fwd, **scores}))
 
             for name, (q10, q50, q90, score) in candidates.items():
                 row = {'horizon': h, 'window': w['window'], 'model': name, 'n': len(y)}
                 if q50 is not None:
                     row.update(point_metrics(y, q10, q50, q90))
                 if score is not None:
-                    rank, ic, _ = ranking_metrics(dates, score, y, h)
+                    rank, ic, _, hits = ranking_metrics(dates, score, y, h)
                     row.update(rank)
                     ic_rows.append(pd.DataFrame({'horizon': h, 'window': w['window'], 'model': name,
                                                  'date': ic.index, 'ic': ic.values}))
+                    hit_rows.append(hits.reset_index().assign(horizon=h, window=w['window'], model=name))
                 metric_rows.append(row)
 
-            if h == 5:
+            if h in (5, 21) and f'fwd_raw_{h}d' in test.columns:
                 frame = pd.DataFrame({
                     'date': test['date'].values, 'ticker': test['ticker'].astype(str).values,
-                    'fwd_raw_5d': test['fwd_raw_5d'].values, 'fwd_nifty_5d': test['fwd_nifty_5d'].values,
+                    f'fwd_raw_{h}d': test[f'fwd_raw_{h}d'].values, f'fwd_nifty_{h}d': test[f'fwd_nifty_{h}d'].values,
                     'score:LightGBM top 20': lq50,
                     'score:Momentum 12-1 top 20': test['score_momentum_12_1'].values,
                 })
@@ -312,7 +333,7 @@ def main():
                     frame['score:Rank regression, factors only top 20'] = candidates['Rank regression, factors only'][3]
                     frame['score:LambdaRank top 20'] = candidates['LambdaRank'][3]
                     frame['score:Factor composite top 20'] = candidates['Factor composite'][3]
-                backtest_frames.append(frame)
+                backtest_frames.setdefault(h, []).append(frame)
 
     if prediction_frames:
         pd.concat(prediction_frames, ignore_index=True).to_parquet(os.path.join(args.out, 'test_predictions.parquet'), index=False)
@@ -332,6 +353,11 @@ def main():
     summary['ic_tstat'] = [tstats.get(k, (np.nan, 0))[0] for k in summary.index]
     summary['ic_samples'] = [tstats.get(k, (np.nan, 0))[1] for k in summary.index]
     summary['windows_ic_positive'] = metrics.assign(pos=metrics['mean_ic'] > 0).groupby(['horizon', 'model'], sort=False)['pos'].sum()
+    if hit_rows:
+        hits = pd.concat(hit_rows, ignore_index=True)
+        hits.to_csv(os.path.join(args.out, 'daily_hits.csv'), index=False)
+        periods = {k: len(non_overlapping(g.sort_values('date'), k[0])) for k, g in hits.groupby(['horizon', 'model'], sort=False)}
+        summary['hit_periods'] = [periods.get(k, 0) for k in summary.index]
     summary = summary.reset_index()
     summary.to_csv(os.path.join(args.out, 'metrics_summary.csv'), index=False)
 
@@ -339,15 +365,17 @@ def main():
     with pd.option_context('display.width', 200, 'display.max_columns', 20, 'display.float_format', '{:.4f}'.format):
         print(summary.to_string(index=False))
 
-    if backtest_frames:
-        bt = backtest(pd.concat(backtest_frames, ignore_index=True))
-        bt.to_csv(os.path.join(args.out, 'backtest_weekly_returns.csv'), index=False)
-        bt_summary = summarize_backtest(bt)
-        bt_summary.to_csv(os.path.join(args.out, 'backtest_summary.csv'), index=False)
-        print("\n=========== BACKTEST (weekly, top 20, after 0.18% round-trip costs) ===========")
+    for h, frames in backtest_frames.items():
+        bt = backtest(pd.concat(frames, ignore_index=True), step=h, ret=f'fwd_raw_{h}d', nifty=f'fwd_nifty_{h}d')
+        bt_summary = summarize_backtest(bt, periods_per_year=252 / h)
+        # The 5-day files keep their original names
+        bt.to_csv(os.path.join(args.out, 'backtest_weekly_returns.csv' if h == 5 else f'backtest_returns_{h}d.csv'), index=False)
+        bt_summary.to_csv(os.path.join(args.out, 'backtest_summary.csv' if h == 5 else f'backtest_summary_{h}d.csv'), index=False)
+        print(f"\n=========== BACKTEST (every {h} sessions, top 20, after 0.18% round-trip costs) ===========")
         with pd.option_context('display.width', 200, 'display.float_format', '{:.4f}'.format):
             print(bt_summary.to_string(index=False))
-        plot_results(summary, ics, bt, args.out)
+        if h == 5:
+            plot_results(summary, ics, bt, args.out)
 
     with open(os.path.join(args.out, 'run_info.json'), 'w') as f:
         json.dump({'parquet': os.path.relpath(args.parquet, ROOT), 'horizons': args.horizons,

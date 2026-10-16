@@ -9,9 +9,13 @@ Reads the test-window scores saved by `evaluate.py --save-predictions` and compa
   - top-20 portfolios with a holding buffer (keep a name while it stays in the top K), and a
     momentum-filtered portfolio (top 40 by momentum, best 20 of those by the blend).
 
+Every model and blend also gets the headline hit rates: how often its top 20 beat the average
+stock and the NIFTY 50 over the horizon.
+
 Usage:
     python Cleaner/evaluate.py --horizons 5 --save-predictions --out results/ensemble_study
-    python Cleaner/ensemble_study.py [--dir results/ensemble_study]
+    python Cleaner/ensemble_study.py [--dir results/ensemble_study] [--horizon 5]
+    (21-day: evaluate.py --horizons 21 --save-predictions --out results/horizon_21d, then --horizon 21)
 """
 
 import os
@@ -19,7 +23,8 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from evaluate import daily_rank_ic, decile_spread, non_overlapping, backtest, summarize_backtest, ROUND_TRIP_COST
+from evaluate import (daily_rank_ic, decile_spread, non_overlapping, top_n_hits, backtest, summarize_backtest,
+                      ROUND_TRIP_COST)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 BASE = ['Momentum 12-1', 'Rank regression', 'LightGBM', 'Per-stock history', 'Factor composite',
@@ -55,11 +60,12 @@ def fitted_weights(prior):
     return ic_w, ridge_w
 
 
-def buffered_backtest(d, score, keep, prefilter=None):
-    """Weekly top-20, but a held name stays while it ranks within the top `keep`."""
+def buffered_backtest(d, score, keep, horizon, prefilter=None):
+    """Top-20 rebalanced every `horizon` sessions, but a held name stays while it ranks within the top `keep`."""
+    ret = f'fwd_raw_{horizon}d'
     held, out = set(), []
-    for dt in sorted(d['date'].unique())[::5]:
-        day = d[d['date'] == dt].dropna(subset=['fwd_raw_5d'])
+    for dt in sorted(d['date'].unique())[::horizon]:
+        day = d[d['date'] == dt].dropna(subset=[ret])
         if prefilter:
             day = day[day[prefilter].rank(ascending=False) <= 2 * TOP_N]
         order = list(day.dropna(subset=[score]).sort_values(score, ascending=False)['ticker'])
@@ -67,18 +73,20 @@ def buffered_backtest(d, score, keep, prefilter=None):
         picks = stay + [t for t in order if t not in stay][:TOP_N - len(stay)]
         turnover = len(set(picks) - held) / TOP_N if held else 1.0
         held = set(picks)
-        r = np.expm1(day.set_index('ticker').loc[picks, 'fwd_raw_5d']).mean()
+        r = np.expm1(day.set_index('ticker').loc[picks, ret]).mean()
         out.append({'date': dt, 'x': r - turnover * ROUND_TRIP_COST, 'x turnover': turnover})
-    return summarize_backtest(pd.DataFrame(out)).iloc[0]
+    return summarize_backtest(pd.DataFrame(out), periods_per_year=252 / horizon).iloc[0]
 
 
 def main():
     parser = argparse.ArgumentParser(description="Out-of-sample ensembles and turnover control on saved test scores.")
     parser.add_argument('--dir', default=os.path.join(ROOT, 'results', 'ensemble_study'))
+    parser.add_argument('--horizon', type=int, default=5)
     args = parser.parse_args()
+    h = args.horizon
 
     d = pd.read_parquet(os.path.join(args.dir, 'test_predictions.parquet'))
-    d = d[d['horizon'] == 5].copy()
+    d = d[d['horizon'] == h].copy()
     d['date'] = pd.to_datetime(d['date'])
 
     # Percentile rank of every score within its day; a missing score sits in the middle
@@ -98,7 +106,7 @@ def main():
         test = d['window'] == k
         prior = d[d['window'] < k]
         if len(prior):
-            prior = prior[~prior['date'].isin(sorted(prior['date'].unique())[-5:])]
+            prior = prior[~prior['date'].isin(sorted(prior['date'].unique())[-h:])]
         ic_w, ridge_w = fitted_weights(prior)
         d.loc[test, 'IC-weighted (expanding)'] = blend(d[test], ic_w)
         d.loc[test, 'Ridge stack (expanding)'] = blend(d[test], ridge_w)
@@ -110,30 +118,34 @@ def main():
     for m in models:
         ic = daily_rank_ic(d['date'], d[m], d['target'])
         ic_series[m] = ic
-        nov = non_overlapping(ic, 5)
+        nov = non_overlapping(ic, h)
         spread = decile_spread(d['date'], d[m], d['target'])
+        hits = top_n_hits(d['date'], d[m], d['target'])
         rows.append({'model': m, 'mean_ic': ic.mean(), 'ic_tstat': nov.mean() / nov.std() * np.sqrt(len(nov)),
-                     'ic_ir_daily': ic.mean() / ic.std(), 'hit_rate': (ic > 0).mean(),
-                     'decile_spread': non_overlapping(spread, 5).mean()})
+                     'ic_ir_daily': ic.mean() / ic.std(), 'ic_positive_days': (ic > 0).mean(),
+                     'decile_spread': non_overlapping(spread, h).mean(),
+                     'hit_vs_avg': hits['hit_vs_avg'].mean(), 'hit_vs_nifty': hits['hit_vs_nifty'].mean(),
+                     'hit_periods': len(non_overlapping(hits, h))})
         for k in windows:
             sel = d['window'] == k
             per_window.append({'model': m, 'window': int(k),
                                'mean_ic': daily_rank_ic(d.loc[sel, 'date'], d.loc[sel, m], d.loc[sel, 'target']).mean()})
 
-    scores = d[['date', 'ticker', 'fwd_raw_5d', 'fwd_nifty_5d']].copy()
+    ret, nifty = f'fwd_raw_{h}d', f'fwd_nifty_{h}d'
+    scores = d[['date', 'ticker', ret, nifty]].copy()
     for m in models:
         scores['score:' + m] = d[m].values
-    bt = backtest(scores.sort_values('date'))
-    bts = summarize_backtest(bt)
+    bt = backtest(scores.sort_values('date'), step=h, ret=ret, nifty=nifty)
+    bts = summarize_backtest(bt, periods_per_year=252 / h)
     summary = pd.DataFrame(rows).merge(bts.rename(columns={'strategy': 'model'}), on='model', how='left')
 
     buffer_rows = []
     for score in ['Momentum 12-1', 'Rank regression'] + list(EQUAL_BLENDS):
         for keep in [20, 40, 60]:
-            s = buffered_backtest(d, score, keep)
+            s = buffered_backtest(d, score, keep, h)
             buffer_rows.append({'portfolio': score, 'keep_while_in_top': keep, **s.drop('strategy').to_dict()})
     for keep in [20, 40]:
-        s = buffered_backtest(d, 'Equal weight, 4 models', keep, prefilter='Momentum 12-1')
+        s = buffered_backtest(d, 'Equal weight, 4 models', keep, h, prefilter='Momentum 12-1')
         buffer_rows.append({'portfolio': 'Momentum top 40, ensemble picks 20', 'keep_while_in_top': keep,
                             **s.drop('strategy').to_dict()})
     buffers = pd.DataFrame(buffer_rows)
