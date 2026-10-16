@@ -276,6 +276,9 @@ def build_live_features(market_df, nifty_df, companies_df, sentiment_df) -> pd.D
         # 10-day Momentum
         group['momentum_10d'] = np.log(group['adj_close'] / group['adj_close'].shift(10)).fillna(0.0)
 
+        # 12-1 month momentum (return from 12 months ago to 1 month ago); NaN without a year of history
+        group['momentum_12_1'] = np.log(group['adj_close'].shift(21) / group['adj_close'].shift(252))
+
         volume_ma_30 = group['volume'].rolling(window=30).mean()
         group['volume_spike'] = (group['volume'] / (volume_ma_30 + 1e-8)).fillna(1.0)
 
@@ -424,6 +427,11 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
         last_rows[col] = last_rows[col].astype('float32')
     X_live = last_rows[features]
 
+    # 12-1 month momentum and its rank across stocks (1 = strongest). In the walk-forward
+    # evaluation it ranked stocks better than every model, so it is published beside the bands.
+    momentum = last_rows['momentum_12_1'].to_numpy(dtype=float)
+    momentum_rank = pd.Series(momentum).rank(ascending=False, method='min').to_numpy()
+
     for horizon in horizons:
         print(f"\n--- Predicting for Horizon: {horizon.upper()} ---")
         
@@ -492,6 +500,8 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
             'q90_return':    q90,
             'spread':        q90 - q10,
             'signal_strength': q50 / (q90 - q10 + 1e-8),
+            'momentum_12_1': momentum,
+            'momentum_rank': momentum_rank,
         })
         all_results.append(horizon_df)
 
@@ -524,6 +534,15 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
             UNIQUE (generated_at, ticker, horizon)
         );
     """)
+    # Added after the table was first created
+    cur.execute("""
+        ALTER TABLE predictions
+            ADD COLUMN IF NOT EXISTS momentum_12_1 FLOAT,
+            ADD COLUMN IF NOT EXISTS momentum_rank INTEGER;
+    """)
+
+    def nullable(value, cast):
+        return None if pd.isna(value) else cast(value)
 
     rows = [
         (
@@ -535,20 +554,25 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
             row['q90_return'],
             row['spread'],
             row['signal_strength'],
+            nullable(row['momentum_12_1'], float),
+            nullable(row['momentum_rank'], int),
         )
         for _, row in results.iterrows()
     ]
 
     psycopg2.extras.execute_values(cur, """
         INSERT INTO predictions
-            (generated_at, ticker, horizon, q10_return, q50_return, q90_return, spread, signal_strength)
+            (generated_at, ticker, horizon, q10_return, q50_return, q90_return, spread, signal_strength,
+             momentum_12_1, momentum_rank)
         VALUES %s
         ON CONFLICT (generated_at, ticker, horizon) DO UPDATE
             SET q10_return      = EXCLUDED.q10_return,
                 q50_return      = EXCLUDED.q50_return,
                 q90_return      = EXCLUDED.q90_return,
                 spread          = EXCLUDED.spread,
-                signal_strength = EXCLUDED.signal_strength;
+                signal_strength = EXCLUDED.signal_strength,
+                momentum_12_1   = EXCLUDED.momentum_12_1,
+                momentum_rank   = EXCLUDED.momentum_rank;
     """, rows)
 
     conn.commit()

@@ -328,6 +328,7 @@ def load_latest_predictions(horizon="5d"):
         SELECT p.ticker, c.company_name, c.sector,
                p.q10_return, p.q50_return, p.q90_return,
                p.spread, p.signal_strength, p.generated_at,
+               p.momentum_12_1, p.momentum_rank,
                COALESCE(m.current_price, 0.0) AS current_price
         FROM predictions p
         LEFT JOIN companies c ON p.ticker = c.ticker
@@ -746,7 +747,12 @@ elif nav == "📈  Top Picks":
         st.warning("No predictions in database. Run `run_daily_update.py` first.")
     else:
         # Filters
-        col_f1, col_f2, col_f3 = st.columns([1.5, 2, 1])
+        col_f0, col_f1, col_f2, col_f3 = st.columns([2, 1.5, 2, 1])
+        with col_f0:
+            rank_by = st.selectbox(
+                "Rank by", ["Model forecast (q50)", "Momentum 12-1"],
+                help="In walk-forward tests (Mar 2025 – Oct 2026), a weekly top-20 by 12-1 month momentum "
+                     "returned +27.4% after costs, vs −2.7% for ranking by the model's forecast.")
         with col_f1:
             signal_filter = st.selectbox("Signal Filter", ["All", "Strong Buy", "Buy", "Neutral", "Sell"])
         with col_f2:
@@ -756,6 +762,8 @@ elif nav == "📈  Top Picks":
             top_n = st.number_input("Show Top N", min_value=5, max_value=200, value=30)
 
         df = preds_df.copy()
+        if rank_by == "Momentum 12-1":
+            df = df.sort_values('momentum_rank', na_position='last')
         df['signal_label'] = df.apply(lambda r: signal_label(r['q50_return'], r['signal_strength'])[0], axis=1)
 
         if signal_filter != "All":
@@ -808,10 +816,13 @@ elif nav == "📈  Top Picks":
         disp['Q90'] = (disp['q90_return'] * 100).map(lambda x: f"{x:+.3f}%")
         disp['Spread'] = (disp['spread'] * 100).map(lambda x: f"{x:.3f}%")
         disp['Signal Str.'] = disp['signal_strength'].map(lambda x: f"{x:.2f}")
+        # momentum_12_1 is a log return; show it as a simple percentage
+        disp['Momentum 12-1'] = disp['momentum_12_1'].map(lambda x: f"{np.expm1(x) * 100:+.1f}%" if pd.notna(x) else "—")
+        disp['Momentum Rank'] = disp['momentum_rank'].map(lambda x: f"{int(x)}" if pd.notna(x) else "—")
         disp = disp.rename(columns={'ticker': 'Ticker', 'company_name': 'Company', 'sector': 'Sector', 'signal_label': 'Signal'})
 
         st.dataframe(
-            disp[['Ticker', 'Company', 'Sector', 'Signal', 'Current Price', 'Safe Alpha', 'Confidence', 'Expected Return (Q50) ▲', 'Signal Str.']],
+            disp[['Ticker', 'Company', 'Sector', 'Signal', 'Current Price', 'Safe Alpha', 'Confidence', 'Expected Return (Q50) ▲', 'Signal Str.', 'Momentum 12-1', 'Momentum Rank']],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -820,6 +831,8 @@ elif nav == "📈  Top Picks":
                 "Confidence": st.column_config.TextColumn(help="Uncertainty-mapped score: based on spread between Q10 and Q90"),
                 "Expected Return (Q50) ▲": st.column_config.TextColumn(help="Median predicted return"),
                 "Signal Str.": st.column_config.TextColumn(help="Sharpe-like signal: Q50 / spread"),
+                "Momentum 12-1": st.column_config.TextColumn(help="Return from 12 months ago to 1 month ago"),
+                "Momentum Rank": st.column_config.TextColumn(help="Rank among all stocks by 12-1 momentum (1 = strongest)"),
             }
         )
 
