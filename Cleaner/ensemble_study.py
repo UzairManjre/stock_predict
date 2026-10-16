@@ -16,6 +16,8 @@ Usage:
     python Cleaner/evaluate.py --horizons 5 --save-predictions --out results/ensemble_study
     python Cleaner/ensemble_study.py [--dir results/ensemble_study] [--horizon 5]
     (21-day: evaluate.py --horizons 21 --save-predictions --out results/horizon_21d, then --horizon 21)
+    --extra adds score columns from other scripts (e.g. tune_ranker.py's "Tuned LightGBM" and "CatBoost")
+    as single models and as members of extra equal-weight blends.
 """
 
 import os
@@ -36,6 +38,8 @@ EQUAL_BLENDS = {
     'Equal weight, 4 models': POOL,
 }
 TOP_N = 20
+SMOOTH_DAYS = 5
+SMOOTHED = ['Equal weight, 4 models', 'Momentum + rank regression']
 
 
 def blend(frame, weights):
@@ -78,25 +82,46 @@ def buffered_backtest(d, score, keep, horizon, prefilter=None):
     return summarize_backtest(pd.DataFrame(out), periods_per_year=252 / horizon).iloc[0]
 
 
+def extra_blends(extras):
+    """Equal-weight blends that add each extra model, or swap it in for the untuned rank regression."""
+    blends = dict(EQUAL_BLENDS)
+    for m in extras:
+        blends[f'Momentum + {m}'] = ['Momentum 12-1', m]
+        blends[f'4 models + {m}'] = POOL + [m]
+        blends[f'4 models, {m} for rank regression'] = [x if x != 'Rank regression' else m for x in POOL]
+    if len(extras) > 1:
+        blends['4 models + ' + ' + '.join(extras)] = POOL + list(extras)
+    return blends
+
+
 def main():
     parser = argparse.ArgumentParser(description="Out-of-sample ensembles and turnover control on saved test scores.")
     parser.add_argument('--dir', default=os.path.join(ROOT, 'results', 'ensemble_study'))
     parser.add_argument('--horizon', type=int, default=5)
+    parser.add_argument('--extra', nargs='*', default=[], help='Extra score columns to evaluate and blend')
     args = parser.parse_args()
     h = args.horizon
+    base = BASE + list(args.extra)
+    blends = extra_blends(args.extra)
 
     d = pd.read_parquet(os.path.join(args.dir, 'test_predictions.parquet'))
     d = d[d['horizon'] == h].copy()
     d['date'] = pd.to_datetime(d['date'])
 
     # Percentile rank of every score within its day; a missing score sits in the middle
-    pct = d.groupby('date')[BASE].rank(pct=True).fillna(0.5)
-    pct.columns = ['p:' + c for c in BASE]
+    pct = d.groupby('date')[base].rank(pct=True).fillna(0.5)
+    pct.columns = ['p:' + c for c in base]
     d = pd.concat([d, pct], axis=1)
     d['p:target'] = d.groupby('date')['target'].rank(pct=True)
 
-    for name, members in EQUAL_BLENDS.items():
+    for name, members in blends.items():
         d[name] = blend(d, {m: 1 for m in members})
+    # Gate 1: average each stock's blended score over its last SMOOTH_DAYS sessions to cut turnover
+    d = d.sort_values(['ticker', 'date'])
+    smoothed = []
+    for name in SMOOTHED:
+        d[f'{name}, smoothed'] = d.groupby('ticker')[name].transform(lambda x: x.rolling(SMOOTH_DAYS, min_periods=1).mean())
+        smoothed.append(f'{name}, smoothed')
 
     d['IC-weighted (expanding)'] = np.nan
     d['Ridge stack (expanding)'] = np.nan
@@ -113,7 +138,7 @@ def main():
         weights_log.append({'window': int(k), **{f'ic_w:{m}': ic_w[m] / sum(ic_w.values()) for m in POOL},
                             **{f'ridge_w:{m}': ridge_w[m] / sum(ridge_w.values()) for m in POOL}})
 
-    models = BASE + list(EQUAL_BLENDS) + ['IC-weighted (expanding)', 'Ridge stack (expanding)']
+    models = base + list(blends) + smoothed + ['IC-weighted (expanding)', 'Ridge stack (expanding)']
     rows, ic_series, per_window = [], {}, []
     for m in models:
         ic = daily_rank_ic(d['date'], d[m], d['target'])
@@ -140,7 +165,7 @@ def main():
     summary = pd.DataFrame(rows).merge(bts.rename(columns={'strategy': 'model'}), on='model', how='left')
 
     buffer_rows = []
-    for score in ['Momentum 12-1', 'Rank regression'] + list(EQUAL_BLENDS):
+    for score in ['Momentum 12-1', 'Rank regression'] + list(args.extra) + list(blends) + smoothed:
         for keep in [20, 40, 60]:
             s = buffered_backtest(d, score, keep, h)
             buffer_rows.append({'portfolio': score, 'keep_while_in_top': keep, **s.drop('strategy').to_dict()})
