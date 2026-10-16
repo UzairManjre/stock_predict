@@ -1,0 +1,30 @@
+# Environment and secrets
+venv/
+.env
+nse_cookies.json
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Training logs, checkpoints and experiment tracking (large; kept in the dated backup)
+csv_logs/
+lightning_logs/
+Cleaner/csv_logs/
+Cleaner/lightning_logs/
+mlruns/
+*.ckpt
+
+# Large data and binary artifacts
+*.parquet
+*.pkl
+*.db
+data/
+backups/
+uploaded_documents/
+debug_output/
+
+# Scraper debugging snapshots
+TATATECH_*.html
+TATATECH_*.png
+bse_screenshot.png
