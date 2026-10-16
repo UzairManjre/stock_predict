@@ -96,6 +96,9 @@ def run_simple_backtest(df, preds, index_df, transaction_cost=0.0012):
 
     # Map back to group indices
     map_df = index_df.copy()
+    if 'time_idx' not in map_df.columns:
+        # decoded_index names the predicted (decoder) step time_idx_first_prediction
+        map_df['time_idx'] = map_df['time_idx_first_prediction']
     map_df['q10']   = q10
     map_df['q50']   = q50
     map_df['q90']   = q90

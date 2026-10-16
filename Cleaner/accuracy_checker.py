@@ -13,7 +13,8 @@ How it works:
      `prediction_accuracy_summary`.
 
 Metrics computed per ticker:
-  - actual_5d_return        : realized forward return
+  - actual_5d_return        : realized 5-day excess log return vs the NIFTY 50
+                              (the quantity the model forecasts)
   - abs_error               : |q50 - actual|
   - sq_error                : (q50 - actual)^2
   - direction_correct       : 1 if sign(q50) == sign(actual), else 0
@@ -157,11 +158,11 @@ def load_pending_batches(conn, min_days: int = 7, force_rebatch: bool = False) -
     cutoff = datetime.utcnow() - timedelta(days=min_days)
     cur.execute("""
         SELECT p.generated_at, p.ticker, c.sector,
-               p.q10_5d_return, p.q50_5d_return, p.q90_5d_return,
+               p.q10_return AS q10_5d_return, p.q50_return AS q50_5d_return, p.q90_return AS q90_5d_return,
                p.spread, p.signal_strength
         FROM predictions p
         LEFT JOIN companies c ON p.ticker = c.ticker
-        WHERE p.generated_at <= %s
+        WHERE p.horizon = '5d' AND p.generated_at <= %s
         ORDER BY p.generated_at, p.ticker
     """, (cutoff,))
 
@@ -193,31 +194,6 @@ def load_price_around(conn, tickers: list, date_from: date, date_to: date) -> pd
     return pd.DataFrame(rows)
 
 
-def load_nifty_return(conn, date_from: date, date_to: date) -> float:
-    """Compute NIFTY 50 actual return over the same window."""
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT adj_close FROM market_data_daily
-        WHERE ticker = '^NSEI'
-          AND date >= %s
-        ORDER BY date ASC LIMIT 1
-    """, (date_from,))
-    r1 = cur.fetchone()
-
-    cur.execute("""
-        SELECT adj_close FROM market_data_daily
-        WHERE ticker = '^NSEI'
-          AND date <= %s
-        ORDER BY date DESC LIMIT 1
-    """, (date_to,))
-    r2 = cur.fetchone()
-    cur.close()
-
-    if r1 and r2 and r1[0] and r2[0]:
-        return float(r2[0] - r1[0]) / float(r1[0])
-    return None
-
-
 # ─── Accuracy computation ─────────────────────────────────────────────────────
 def get_nth_trading_day_price(price_pivot: pd.DataFrame, ticker: str, ref_date: date, n: int = 5):
     """
@@ -240,13 +216,10 @@ def get_nth_trading_day_price(price_pivot: pd.DataFrame, ticker: str, ref_date: 
 
     base_price = float(price_on_pred_date_series.iloc[-1])
 
+    # Score only complete horizons; a batch without n sessions yet is retried on a later run
     if len(forward) < n:
-        # Use whatever is available — at least 3 trading days
-        if len(forward) < 3:
-            return None, None
-        price_n = float(forward.iloc[-1])
-    else:
-        price_n = float(forward.iloc[n - 1])
+        return None, None
+    price_n = float(forward.iloc[n - 1])
 
     return base_price, price_n
 
@@ -262,8 +235,8 @@ def evaluate_batch(batch_df: pd.DataFrame, conn) -> tuple:
     date_from = batch_date - timedelta(days=3)         # include a few days before for base price
     date_to   = batch_date + timedelta(days=15)        # 15 calendar ≈ 10+ trading days
 
-    # Load price data
-    price_df = load_price_around(conn, tickers, date_from, date_to)
+    # Load price data (with the NIFTY 50, the benchmark the forecasts are measured against)
+    price_df = load_price_around(conn, tickers + ['NIFTY50'], date_from, date_to)
 
     if price_df.empty:
         print(f"  [WARN] No price data found for batch {batch_date}")
@@ -275,7 +248,11 @@ def evaluate_batch(batch_df: pd.DataFrame, conn) -> tuple:
     # Pivot: index=date, columns=ticker
     price_pivot = price_df.pivot(index='date', columns='ticker', values='adj_close').sort_index()
 
-    nifty_ret = load_nifty_return(conn, batch_date, batch_date + timedelta(days=10))
+    nifty_base, nifty_5d = get_nth_trading_day_price(price_pivot, 'NIFTY50', batch_date, n=5)
+    if nifty_base is None or nifty_5d is None:
+        print(f"  [INFO] Batch {batch_date}: 5 sessions of NIFTY 50 prices not available yet; will retry later.")
+        return [], None
+    nifty_ret = float(np.log(nifty_5d / nifty_base))
 
     row_records = []
     missing_count = 0
@@ -294,7 +271,8 @@ def evaluate_batch(batch_df: pd.DataFrame, conn) -> tuple:
             missing_count += 1
             continue
 
-        actual_ret = (price_5d - base_price) / base_price
+        # The forecasts are 5-day excess log returns over the NIFTY 50, so score against the same
+        actual_ret = float(np.log(price_5d / base_price)) - nifty_ret
 
         abs_err = abs(q50 - actual_ret)
         sq_err  = (q50 - actual_ret) ** 2
@@ -426,6 +404,8 @@ def write_accuracy_rows(conn, rows: list):
 
 
 def write_summary(conn, summary: dict):
+    # psycopg2 cannot adapt numpy scalars; convert them to plain Python values
+    summary = {k: (v.item() if isinstance(v, np.generic) else v) for k, v in summary.items()}
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO prediction_accuracy_summary (
@@ -474,6 +454,11 @@ def run_backtest_from_csv(conn, csv_path: str):
     df = pd.read_csv(csv_path)
     # Normalize column names
     df.columns = df.columns.str.lower().str.replace(' ', '_')
+
+    # predict.py's own CSVs hold every horizon with generic column names; keep the 5-day rows
+    if 'horizon' in df.columns:
+        df = df[df['horizon'] == '5d'].rename(columns={
+            'q10_return': 'q10_5d_return', 'q50_return': 'q50_5d_return', 'q90_return': 'q90_5d_return'})
 
     required = {'ticker', 'q50_5d_return'}
     if not required.issubset(df.columns):

@@ -880,7 +880,7 @@ elif nav == "🔍  Stock Deep Dive":
 
     # Load data
     price_df = load_price_history(selected, price_days)
-    pred_hist = load_prediction_history(selected, 90)
+    pred_hist = load_prediction_history(selected, selected_horizon, days=90)
     sent_df = load_sentiment_history(selected, 90)
 
     # Company info
@@ -1012,11 +1012,11 @@ elif nav == "🔍  Stock Deep Dive":
             line=dict(color='#f59e0b', width=1.5, dash='dot')), row=4, col=1)
 
         fig.update_layout(
-            **PLOT_LAYOUT,
+            **{**PLOT_LAYOUT,
+               'legend': dict(orientation='h', y=1.02, x=0, font=dict(size=10),
+                              bgcolor='rgba(10,14,26,0.8)', bordercolor='rgba(59,130,246,0.2)', borderwidth=1)},
             height=680,
             xaxis_rangeslider_visible=False,
-            legend=dict(orientation='h', y=1.02, x=0, font=dict(size=10),
-                       bgcolor='rgba(10,14,26,0.8)', bordercolor='rgba(59,130,246,0.2)', borderwidth=1),
         )
         fig.update_yaxes(row=3, col=1, range=[0, 100])
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
