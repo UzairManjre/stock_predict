@@ -35,7 +35,10 @@ import lightgbm as lgb
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+from ranking import (has_factor_features, add_cross_sectional_ranks, fit_rank_regressor,
+                     fit_lambdarank, predict_scores)
+
+ROOT =os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DEFAULT_PARQUET = os.path.join(ROOT, 'training_data', 'processed_features.parquet')
 DEFAULT_OUT = os.path.join(ROOT, 'results')
 
@@ -63,7 +66,7 @@ LGBM_PARAMS = {
 
 # ─── Data ─────────────────────────────────────────────────────────────────────
 
-def load_data(path):
+def load_data(path, horizons):
     df = pd.read_parquet(path)
     df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
     for col in CATEGORICAL_COLS:
@@ -77,6 +80,8 @@ def load_data(path):
     # Realized forward 5-day raw return, for the backtest
     df['fwd_raw_5d'] = g['log_return_5d'].shift(-5)
     df['fwd_nifty_5d'] = df.groupby('ticker', observed=True)['nifty_5d_return'].shift(-5)
+    if has_factor_features(df):
+        df = add_cross_sectional_ranks(df, horizons)
     return df
 
 
@@ -230,7 +235,10 @@ def main():
 
     os.makedirs(args.out, exist_ok=True)
     print(f"Loading {args.parquet}...")
-    df = load_data(args.parquet)
+    df = load_data(args.parquet, args.horizons)
+    use_rankers = has_factor_features(df)
+    if not use_rankers:
+        print("Factor features not found in the parquet; skipping the ranking models.")
     sessions = np.array(sorted(df['date'].unique()))
     print(f"{len(df)} rows, {df['ticker'].nunique()} stocks, {len(sessions)} sessions "
           f"({pd.Timestamp(sessions[0]).date()} to {pd.Timestamp(sessions[-1]).date()})")
@@ -263,6 +271,11 @@ def main():
                 'Momentum 12-1': (None, None, None, test['score_momentum_12_1'].to_numpy()),
                 'Reversal 1-month': (None, None, None, test['score_reversal_1m'].to_numpy()),
             }
+            if use_rankers:
+                rank_reg = predict_scores(fit_rank_regressor(train, early_stop, h), test)
+                lambda_rank = predict_scores(fit_lambdarank(train, early_stop, h), test)
+                candidates['Rank regression'] = (None, None, None, rank_reg)
+                candidates['LambdaRank'] = (None, None, None, lambda_rank)
             for name, (q10, q50, q90, score) in candidates.items():
                 row = {'horizon': h, 'window': w['window'], 'model': name, 'n': len(y)}
                 if q50 is not None:
@@ -275,12 +288,16 @@ def main():
                 metric_rows.append(row)
 
             if h == 5:
-                backtest_frames.append(pd.DataFrame({
+                frame = pd.DataFrame({
                     'date': test['date'].values, 'ticker': test['ticker'].astype(str).values,
                     'fwd_raw_5d': test['fwd_raw_5d'].values, 'fwd_nifty_5d': test['fwd_nifty_5d'].values,
                     'score:LightGBM top 20': lq50,
                     'score:Momentum 12-1 top 20': test['score_momentum_12_1'].values,
-                }))
+                })
+                if use_rankers:
+                    frame['score:Rank regression top 20'] = candidates['Rank regression'][3]
+                    frame['score:LambdaRank top 20'] = candidates['LambdaRank'][3]
+                backtest_frames.append(frame)
 
     metrics = pd.DataFrame(metric_rows)
     ics = pd.concat(ic_rows, ignore_index=True) if ic_rows else pd.DataFrame()

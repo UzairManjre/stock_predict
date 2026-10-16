@@ -286,7 +286,17 @@ def main():
 
         # Sentiment Volume (7d rolling sum of announcement chunks analyzed)
         group['sentiment_volume_7d'] = group['total_chunks_analyzed'].fillna(0.0).rolling(window=7).sum()
-        
+
+        # Cross-sectional factor inputs (left as NaN until enough history; tree models handle NaN)
+        # 12-1 month momentum: return from 12 months ago to 1 month ago (skips the reversal month)
+        group['momentum_12_1'] = np.log(group['adj_close'].shift(21) / group['adj_close'].shift(252))
+        group['volatility_60d'] = group['log_return_1d'].rolling(window=60, min_periods=40).std()
+        traded_value = group['adj_close'] * group['volume']
+        # Amihud illiquidity: average absolute return per crore of rupees traded
+        group['amihud_illiquidity_21d'] = (group['log_return_1d'].abs() / (traded_value / 1e7 + 1e-8)).rolling(window=21, min_periods=15).mean()
+        # Size proxy (no free market-cap history): log of median daily traded value
+        group['size_proxy'] = np.log1p(traded_value.rolling(window=60, min_periods=20).median())
+
         decayed_chunks.append(group)
 
     df = pd.concat(decayed_chunks, ignore_index=True)
@@ -307,6 +317,13 @@ def main():
     df = pd.merge(df, nifty_df, on='date', how='left')
     for col in ['nifty_50_return', 'nifty_5d_return', 'nifty_10d_return', 'nifty_21d_return', 'nifty_126d_return', 'nifty_volatility_20d']:
         df[col] = df[col].fillna(0.0)
+
+    # 60-day beta to the NIFTY 50 (needs the index returns, so computed after the merge)
+    df = df.sort_values(['ticker', 'date']).reset_index(drop=True)
+    by_ticker = df.groupby('ticker')
+    cov = by_ticker.apply(lambda g: g['log_return_1d'].rolling(60, min_periods=40).cov(g['nifty_50_return']), include_groups=False)
+    var = by_ticker['nifty_50_return'].transform(lambda s: s.rolling(60, min_periods=40).var())
+    df['beta_60d'] = cov.reset_index(level=0, drop=True).reindex(df.index) / (var + 1e-12)
 
     # 10b. Calculate Alpha Targets
     print("Calculating Alpha targets...")
