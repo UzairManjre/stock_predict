@@ -3,6 +3,7 @@ import sys
 import json
 import pickle
 import warnings
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import torch
@@ -214,7 +215,11 @@ def main():
     df = pd.read_parquet(processed_file)
     print(f"Loaded dataset of shape {df.shape}")
 
-    # Drop target rows with NaN values (final 5 days where future returns are unknown)
+    # The TFT decoder step is the session after the encoder ends, so row t+1 carries the excess
+    # return over (t, t+5]: the same quantity LightGBM predicts from the features at t.
+    df = df.sort_values(['ticker', 'time_idx'])
+    df['target'] = df.groupby('ticker')['target_5d'].shift(1)
+    # Drop rows whose target is unknown (first row per stock, last sessions without 5 days of future)
     df = df[df['target'].notna()]
     print(f"Dataset shape after dropping NaN targets: {df.shape}")
 
@@ -244,15 +249,16 @@ def main():
 
     # 2. Chronological Splits with 5-day Purged Embargo Gap
     print("Splitting dataset chronologically with 5-day purged boundaries...")
-    max_encoder_length = 60   # ~3 trading months lookback
-    max_prediction_length = 5  # 1 trading week lookforward
-    
+    max_encoder_length = 60    # ~3 trading months lookback
+    max_prediction_length = 1  # one decoder step; it carries the 5-day excess return
+    TARGET_HORIZON = 5         # sessions covered by the target, and the embargo between splits
+
     train_end_idx = df[df['date'] < args.train_end]['time_idx'].max()
     val_end_idx = df[df['date'] < args.val_end]['time_idx'].max()
-    
-    # 5 trading days gap (embargo) between splits
-    val_start_idx = train_end_idx + max_prediction_length + 1
-    test_start_idx = val_end_idx + max_prediction_length + 1
+
+    # Embargo: no target window may straddle two splits
+    val_start_idx = train_end_idx + TARGET_HORIZON + 1
+    test_start_idx = val_end_idx + TARGET_HORIZON + 1
     
     train_df = df[df['time_idx'] <= train_end_idx].copy()
     val_df = df[(df['time_idx'] >= val_start_idx) & (df['time_idx'] <= val_end_idx)].copy()
@@ -299,7 +305,9 @@ def main():
         max_prediction_length=max_prediction_length,
 
         static_categoricals=["ticker", "sector", "industry", "has_sentiment_history"],
-        time_varying_known_categoricals=["day_of_week", "month", "is_earnings_week", "quarter_end"],
+        time_varying_known_categoricals=["day_of_week", "month", "quarter_end"],
+        # Derived from actual filings, so it is not known in advance (was a look-ahead leak as "known")
+        time_varying_unknown_categoricals=["is_earnings_week"],
         time_varying_unknown_reals=real_cols,
 
         # GroupNormalizer for target: normalizes per-ticker (leakage-free, per-stock scale)
@@ -469,10 +477,12 @@ def main():
                     targets_list.append(y_batch[0].cpu())
             preds   = torch.cat(preds_list,   dim=0).float()  # [N, horizon, Q]
             targets = torch.cat(targets_list, dim=0).float()  # [N, horizon]
-            return preds[..., 1], targets  # slice median quantile
+            return preds, targets
 
-        val_preds_median,  val_target  = _manual_eval(best_tft, val_eval_loader,  device)
-        test_preds_median, test_target = _manual_eval(best_tft, test_eval_loader, device)
+        val_preds,  val_target  = _manual_eval(best_tft, val_eval_loader,  device)
+        test_preds, test_target = _manual_eval(best_tft, test_eval_loader, device)
+        val_preds_median  = val_preds[..., 1]   # quantile idx: 0=q10, 1=q50, 2=q90
+        test_preds_median = test_preds[..., 1]
 
         # Guard against drop_last length mismatch
         n_val  = min(len(val_preds_median),  len(val_target))
@@ -515,12 +525,10 @@ def main():
             print(f"[WARN] Attention interpretation failed: {e}")
 
         # ── 8. Backtest ───────────────────────────────────────────────────────
-        # We already have test_preds_median [N, horizon] from _manual_eval.
-        # Reconstruct a 3-quantile tensor and use the dataset's stored index.
+        # Use all three quantiles from _manual_eval so the spread-based position sizing works,
+        # aligned with the dataset's stored index.
         try:
-            # Expand median-only to fake [N, horizon, 3] so run_simple_backtest
-            # can still slice preds[...,0/1/2] symmetrically (all columns = median).
-            test_preds_bt = test_preds_median.unsqueeze(-1).expand(-1, -1, 3)
+            test_preds_bt = test_preds
             # Trim index to match actual prediction count (multi-worker dataloaders
             # may silently drop the last partial batch, producing fewer predictions
             # than dataset.index rows).
@@ -575,6 +583,22 @@ def main():
         with open(stats_path, 'w') as f:
             json.dump(feature_stats, f)
         print(f"  Saved feature_stats.json → {stats_path}")
+
+        # 9d. Record which checkpoint predict.py should load
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        best_score = checkpoint_callback.best_model_score
+        registry = {
+            'tft_checkpoint': os.path.relpath(os.path.abspath(best_model_path), project_root),
+            'target': 'excess log return vs NIFTY 50 over (t, t+5], on the decoder step t+1',
+            'val_loss': float(best_score) if best_score is not None else None,
+            'train_end': args.train_end,
+            'val_end': args.val_end,
+            'trained_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        registry_path = os.path.join(artifacts_dir, 'model_registry.json')
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=2)
+        print(f"  Saved model_registry.json → {registry_path}")
         print("All inference artifacts saved. ✓")
         
     else:

@@ -34,7 +34,7 @@ def run_walk_forward(df, real_cols, hparams, num_windows=3):
     
     dead_zone = 10  # 10 days dead zone to prevent leakage
     max_encoder_length = 60
-    max_prediction_length = 5
+    max_prediction_length = 1  # one decoder step carrying the 5-day excess return
     
     cv_results = []
     out_of_sample_preds = []
@@ -70,7 +70,8 @@ def run_walk_forward(df, real_cols, hparams, num_windows=3):
             min_prediction_length=max_prediction_length,
             max_prediction_length=max_prediction_length,
             static_categoricals=["ticker", "sector", "industry", "has_sentiment_history"],
-            time_varying_known_categoricals=["day_of_week", "month", "is_earnings_week", "quarter_end"],
+            time_varying_known_categoricals=["day_of_week", "month", "quarter_end"],
+            time_varying_unknown_categoricals=["is_earnings_week"],  # from actual filings, not known ahead
             time_varying_unknown_reals=real_cols,
             target_normalizer=target_normalizer,
             add_relative_time_idx=True,
@@ -167,6 +168,9 @@ def main():
     data_path = os.path.join(os.path.dirname(__file__), '..', 'training_data', 'processed_features.parquet')
     print("Loading features...")
     df = pd.read_parquet(data_path)
+    # Decoder row t+1 carries the excess return over (t, t+5], as in train_tft.py
+    df = df.sort_values(['ticker', 'time_idx'])
+    df['target'] = df.groupby('ticker')['target_5d'].shift(1)
     df = df[df['target'].notna()].copy()
     
     categorical_cols = ["ticker", "sector", "industry", "day_of_week", "month", "is_earnings_week", "has_sentiment_history", "quarter_end"]

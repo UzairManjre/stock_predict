@@ -27,6 +27,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 
+from build_features import shift_sentiment_to_next_trading_day
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ─── Load .env ────────────────────────────────────────────────────────────────
@@ -177,14 +179,14 @@ def build_live_features(market_df, nifty_df, companies_df, sentiment_df) -> pd.D
     the data passed in (no DB access). Scalers are NOT refit — PyTorch
     Forecasting applies the saved scaler params from the checkpoint.
     """
-    # Sentiment 1-day shift (anti-lookahead)
-    sentiment_df = sentiment_df.copy()
-    sentiment_df['date'] = sentiment_df['date'] + pd.Timedelta(days=1)
+    # Sentiment moves to the next trading session (anti-lookahead; same rule as training)
+    sentiment_df = shift_sentiment_to_next_trading_day(sentiment_df, market_df['date'])
 
     tickers_with_sentiment = set(sentiment_df['ticker'].unique())
 
-    # NIFTY returns
-    nifty_df = nifty_df.copy().sort_values('date')
+    # NIFTY returns, aligned to the stock trading calendar (same rule as training)
+    calendar = pd.DatetimeIndex(sorted(market_df['date'].unique()), name='date')
+    nifty_df = nifty_df.set_index('date').reindex(calendar).ffill().bfill().reset_index()
     nifty_df['nifty_50_return'] = np.log(
         nifty_df['nifty_close'] / nifty_df['nifty_close'].shift(1)
     ).fillna(0.0)
@@ -375,14 +377,8 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
     import torch
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 
-    # --- RESTORE TFT (Version 13 Checkpoint) ---
-    import torch
-    from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
     import pickle
-    
-    # Hardcode version 13 checkpoint as requested
-    checkpoint_path = os.path.join(os.path.dirname(__file__), '..', 'csv_logs', 'tft_stock_predictor', 'version_13', 'checkpoints', 'best-tft-epoch=08-val_loss=0.0242.ckpt')
-    
+
     print(f"\nLoading TFT checkpoint: {checkpoint_path}")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Inference device: {device}")
@@ -443,11 +439,22 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
 
         if horizon == '5d':
             print("Generating TFT predictions for 5d...")
-            # Drop the new V2 features from the dataframe ONLY for TFT's TimeSeriesDataSet
             tft_df = df.copy()
-            if 'nifty_volatility_20d' in tft_df.columns:
-                tft_df = tft_df.drop(columns=['nifty_volatility_20d', 'sector_volatility_20d'])
-                
+
+            # predict=True treats each stock's final row as the decoder step. Append one future
+            # session per stock so that step lies AFTER the last known day; otherwise the
+            # "forecast" covers a day whose prices are already known. Its unknown inputs are
+            # masked by the TFT; only the calendar (known) inputs are used.
+            future = tft_df.sort_values('time_idx').groupby('ticker').tail(1).copy()
+            next_day = future['date'] + pd.offsets.BDay(1)
+            future['date'] = next_day
+            future['time_idx'] = future['time_idx'] + 1
+            future['day_of_week'] = next_day.dt.dayofweek.astype(str)
+            future['month'] = next_day.dt.month.astype(str)
+            future['quarter_end'] = (next_day.dt.month.isin([3, 6, 9, 12]) & next_day.dt.is_month_end).astype(int).astype(str)
+            future['target'] = 0.0
+            tft_df = pd.concat([tft_df, future], ignore_index=True)
+
             live_dataset = TimeSeriesDataSet.from_dataset(
                 training_dataset, tft_df, stop_randomization=True, predict=True
             )
@@ -457,15 +464,21 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
             with torch.no_grad():
                 out = tft.predict(live_loader, mode='quantiles', return_index=True, trainer_kwargs=predict_kwargs)
 
-            pred_tensor = out.output  # [N, 5, 3] for q10/q50/q90
-            q10_tft = pred_tensor[..., 0].mean(dim=1).cpu().numpy()
-            q50_tft = pred_tensor[..., 1].mean(dim=1).cpu().numpy()
-            q90_tft = pred_tensor[..., 2].mean(dim=1).cpu().numpy()
-            
+            pred_tensor = out.output  # [N, 1, 3] for q10/q50/q90
+
+            # The TFT returns stocks in its dataset's order; align them to the LightGBM order
+            tft_tickers = np.asarray(out.index['ticker']).astype(str)
+            def tft_quantile(i):
+                values = pred_tensor[..., i].mean(dim=1).cpu().numpy()
+                return pd.Series(values, index=tft_tickers).reindex(tickers).to_numpy()
+            q10_tft, q50_tft, q90_tft = tft_quantile(0), tft_quantile(1), tft_quantile(2)
+
             print("Blending TFT and LightGBM predictions (60/40)...")
-            q10 = (q10_tft * 0.6) + (q10_lgbm * 0.4)
-            q50 = (q50_tft * 0.6) + (q50_lgbm * 0.4)
-            q90 = (q90_tft * 0.6) + (q90_lgbm * 0.4)
+            # Stocks the TFT could not score (too little history) fall back to LightGBM alone
+            blend = lambda tft_q, lgbm_q: np.where(np.isnan(tft_q), lgbm_q, tft_q * 0.6 + lgbm_q * 0.4)
+            q10 = blend(q10_tft, q10_lgbm)
+            q50 = blend(q50_tft, q50_lgbm)
+            q90 = blend(q90_tft, q90_lgbm)
         else:
             print("Using 100% LightGBM predictions...")
             q10, q50, q90 = q10_lgbm, q50_lgbm, q90_lgbm
@@ -569,8 +582,15 @@ def main():
 
     # ── Resolve checkpoint ───────────────────────────────────────────────────
     checkpoint_path = args.checkpoint
+    registry_path = os.path.join(ARTIFACTS_DIR, 'model_registry.json')
+    if checkpoint_path is None and os.path.exists(registry_path):
+        # The checkpoint train_tft.py recorded as its best model
+        with open(registry_path, 'r') as f:
+            registry = json.load(f)
+        checkpoint_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', registry['tft_checkpoint']))
+        print(f"Using registered checkpoint: {checkpoint_path} (trained {registry.get('trained_at')})")
     if checkpoint_path is None:
-        # Auto-discover latest checkpoint (look in workspace root, one level up)
+        # Fallback: auto-discover latest checkpoint (look in workspace root, one level up)
         import glob
         pattern = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '**', '*.ckpt'))
         ckpts = glob.glob(pattern, recursive=True)

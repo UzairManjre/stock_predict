@@ -52,6 +52,30 @@ def decay_forward_fill(series, half_life=5.0):
         out[i] = current
     return out
 
+def shift_sentiment_to_next_trading_day(sentiment_df, trading_dates):
+    """
+    Move each day's filing sentiment to the first trading session AFTER the filing date.
+
+    Filing timestamps are stored as midnight, so a filing dated D can only inform trading from the
+    next session. Adding one calendar day instead dropped every Friday and Saturday filing, whose
+    D+1 is a weekend with no market row. Filing days that land on the same session (Fri, Sat,
+    Sun -> Mon) are combined, weighting the scores by the number of chunks behind each.
+    """
+    sessions = np.array(sorted(pd.to_datetime(pd.Series(trading_dates).unique())), dtype='datetime64[ns]')
+    pos = np.searchsorted(sessions, sentiment_df['date'].values.astype('datetime64[ns]'), side='right')
+    has_session = pos < len(sessions)
+    out = sentiment_df[has_session].copy()
+    out['date'] = sessions[pos[has_session]]
+
+    score_cols = ['net_sentiment_score', 'bullish_intensity', 'bearish_intensity']
+    out['_weight'] = out['total_chunks_analyzed'].fillna(0).clip(lower=1)
+    for col in score_cols:
+        out[col] = out[col].fillna(0.0) * out['_weight']
+    combined = out.groupby(['date', 'ticker'], as_index=False)[score_cols + ['total_chunks_analyzed', '_weight']].sum()
+    for col in score_cols:
+        combined[col] = combined[col] / combined['_weight']
+    return combined.drop(columns='_weight')
+
 def main():
     print(f"Connecting to database {DB_NAME}...")
     conn = psycopg2.connect(
@@ -81,6 +105,11 @@ def main():
         ORDER BY date
     """, conn, parse_dates=['date'])
     print(f"Loaded {len(nifty_df)} NIFTY50 rows.")
+
+    # Align NIFTY50 to the stock trading calendar: forward-fill index days that are missing (instead
+    # of treating them as zero returns) and drop index rows on days no stock traded.
+    calendar = pd.DatetimeIndex(sorted(market_df['date'].unique()), name='date')
+    nifty_df = nifty_df.set_index('date').reindex(calendar).ffill().bfill().reset_index()
 
     # Calculate NIFTY50 log returns
     nifty_df['nifty_50_return'] = np.log(nifty_df['nifty_close'] / nifty_df['nifty_close'].shift(1))
@@ -114,8 +143,10 @@ def main():
     """, conn, parse_dates=['date'])
     print(f"Loaded {len(sentiment_df)} sentiment rows.")
 
-    # Apply 1-day shift to eliminate lookahead bias
-    sentiment_df['date'] = sentiment_df['date'] + pd.Timedelta(days=1)
+    # Move sentiment to the next trading session (no lookahead, and no weekend filings lost)
+    raw_filing_days = len(sentiment_df)
+    sentiment_df = shift_sentiment_to_next_trading_day(sentiment_df, market_df['date'])
+    print(f"Mapped {raw_filing_days} filing days onto {len(sentiment_df)} trading sessions.")
 
     # 5. Check which tickers have any sentiment history
     tickers_with_sentiment = set(sentiment_df['ticker'].unique())

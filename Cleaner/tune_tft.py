@@ -24,6 +24,9 @@ def objective(trial):
     # 1. Load Data
     data_path = os.path.join(os.path.dirname(__file__), '..', 'training_data', 'processed_features.parquet')
     df = pd.read_parquet(data_path)
+    # Decoder row t+1 carries the excess return over (t, t+5], as in train_tft.py
+    df = df.sort_values(['ticker', 'time_idx'])
+    df['target'] = df.groupby('ticker')['target_5d'].shift(1)
     df = df[df['target'].notna()].copy()
 
     # Data types
@@ -56,7 +59,7 @@ def objective(trial):
     val_df = df[(df['time_idx'] > train_end_idx) & (df['time_idx'] <= val_end_idx)]
     
     max_encoder_length = 60
-    max_prediction_length = 5
+    max_prediction_length = 1  # one decoder step carrying the 5-day excess return
     
     val_df_with_history = pd.concat([
         train_df.groupby('ticker').tail(max_encoder_length),
@@ -76,7 +79,8 @@ def objective(trial):
         min_prediction_length=max_prediction_length,
         max_prediction_length=max_prediction_length,
         static_categoricals=["ticker", "sector", "industry", "has_sentiment_history"],
-        time_varying_known_categoricals=["day_of_week", "month", "is_earnings_week", "quarter_end"],
+        time_varying_known_categoricals=["day_of_week", "month", "quarter_end"],
+        time_varying_unknown_categoricals=["is_earnings_week"],  # from actual filings, not known ahead
         time_varying_unknown_reals=real_cols,
         target_normalizer=target_normalizer,
         add_relative_time_idx=True,
