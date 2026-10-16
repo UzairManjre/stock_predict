@@ -206,6 +206,11 @@ def main():
     parser = argparse.ArgumentParser(description="Train Temporal Fusion Transformer on stock data.")
     parser.add_argument("--train-end", type=str, default="2024-07-01", help="Train end date (YYYY-MM-DD)")
     parser.add_argument("--val-end", type=str, default="2025-07-01", help="Validation end date (YYYY-MM-DD)")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="Adam weight decay")
+    parser.add_argument("--gradient-clip", type=float, default=0.1, help="Gradient norm clipping value")
+    parser.add_argument("--max-epochs", type=int, default=30)
+    parser.add_argument("--experiment", action="store_true",
+                        help="Do not register the checkpoint for predict.py (trial runs)")
     args = parser.parse_args()
 
     # 1. Load preprocessed features
@@ -376,7 +381,7 @@ def main():
         loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]), # Predict 10th, 50th, 90th percentiles
         log_interval=50,
         reduce_on_plateau_patience=5,
-        weight_decay=1e-4
+        weight_decay=args.weight_decay
     )
     print(f"Number of parameters in TFT: {tft.size() / 1e3:.1f}k")
 
@@ -403,10 +408,10 @@ def main():
 
     print("Configuring Trainer...")
     trainer = Trainer(
-        max_epochs=30,
+        max_epochs=args.max_epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
-        gradient_clip_val=0.1,
+        gradient_clip_val=args.gradient_clip,
         callbacks=[early_stop_callback, checkpoint_callback],
         logger=logger,
         precision="16-mixed" if torch.cuda.is_available() else 32
@@ -599,9 +604,12 @@ def main():
             'trained_at': datetime.now().isoformat(timespec='seconds'),
         }
         registry_path = os.path.join(artifacts_dir, 'model_registry.json')
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=2)
-        print(f"  Saved model_registry.json → {registry_path}")
+        if args.experiment:
+            print(f"  Experiment run: checkpoint NOT registered ({registry['tft_checkpoint']})")
+        else:
+            with open(registry_path, 'w') as f:
+                json.dump(registry, f, indent=2)
+            print(f"  Saved model_registry.json → {registry_path}")
         print("All inference artifacts saved. ✓")
         
     else:
