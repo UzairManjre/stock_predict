@@ -28,6 +28,11 @@ STOCK_FEATURES = [
     'momentum_12_1', 'volatility_60d', 'amihud_illiquidity_21d', 'size_proxy', 'beta_60d',
 ]
 RANK_FEATURES = ['xs_' + c for c in STOCK_FEATURES] + ['sector']
+# Well-known cross-sectional factors only; tests whether the technical indicators add or dilute signal
+FACTOR_FEATURES = ['xs_' + c for c in [
+    'momentum_12_1', 'log_return_21d', 'volatility_60d', 'amihud_illiquidity_21d', 'size_proxy',
+    'beta_60d', 'price_vs_52w_high', 'price_vs_sma50', 'sector_relative_return_1d',
+]] + ['sector']
 N_RELEVANCE_LEVELS = 10   # LambdaRank labels: the target's decile within the day (0 = worst)
 
 BASE_PARAMS = {
@@ -59,9 +64,14 @@ def _relevance(frame, h):
     return np.clip((frame[f'xs_target_{h}d'] * N_RELEVANCE_LEVELS).astype(int), 0, N_RELEVANCE_LEVELS - 1)
 
 
-def fit_rank_regressor(train, early_stop, h):
-    dtrain = lgb.Dataset(train[RANK_FEATURES], label=train[f'xs_target_{h}d'], categorical_feature=['sector'])
-    dvalid = lgb.Dataset(early_stop[RANK_FEATURES], label=early_stop[f'xs_target_{h}d'],
+def factor_composite(frame):
+    """No-training baseline: average daily rank of momentum, low volatility and nearness to the 52-week high."""
+    return ((frame['xs_momentum_12_1'] + (1 - frame['xs_volatility_60d']) + frame['xs_price_vs_52w_high']) / 3).to_numpy()
+
+
+def fit_rank_regressor(train, early_stop, h, features=RANK_FEATURES):
+    dtrain = lgb.Dataset(train[features], label=train[f'xs_target_{h}d'], categorical_feature=['sector'])
+    dvalid = lgb.Dataset(early_stop[features], label=early_stop[f'xs_target_{h}d'],
                          categorical_feature=['sector'], reference=dtrain)
     return lgb.train({**BASE_PARAMS, 'objective': 'regression', 'metric': 'l2'}, dtrain,
                      num_boost_round=2000, valid_sets=[dvalid],
@@ -83,4 +93,4 @@ def fit_lambdarank(train, early_stop, h):
 
 def predict_scores(model, frame):
     """Higher score = expected to rank higher. Order matches `frame`."""
-    return model.predict(frame[RANK_FEATURES], num_iteration=model.best_iteration)
+    return model.predict(frame[model.feature_name()], num_iteration=model.best_iteration)

@@ -36,7 +36,7 @@ import lightgbm as lgb
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from ranking import (has_factor_features, add_cross_sectional_ranks, fit_rank_regressor,
-                     fit_lambdarank, predict_scores)
+                     fit_lambdarank, predict_scores, factor_composite, FACTOR_FEATURES)
 
 ROOT =os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DEFAULT_PARQUET = os.path.join(ROOT, 'training_data', 'processed_features.parquet')
@@ -274,8 +274,11 @@ def main():
             if use_rankers:
                 rank_reg = predict_scores(fit_rank_regressor(train, early_stop, h), test)
                 lambda_rank = predict_scores(fit_lambdarank(train, early_stop, h), test)
+                rank_reg_factors = predict_scores(fit_rank_regressor(train, early_stop, h, FACTOR_FEATURES), test)
                 candidates['Rank regression'] = (None, None, None, rank_reg)
+                candidates['Rank regression, factors only'] = (None, None, None, rank_reg_factors)
                 candidates['LambdaRank'] = (None, None, None, lambda_rank)
+                candidates['Factor composite'] = (None, None, None, factor_composite(test))
             for name, (q10, q50, q90, score) in candidates.items():
                 row = {'horizon': h, 'window': w['window'], 'model': name, 'n': len(y)}
                 if q50 is not None:
@@ -296,7 +299,9 @@ def main():
                 })
                 if use_rankers:
                     frame['score:Rank regression top 20'] = candidates['Rank regression'][3]
+                    frame['score:Rank regression, factors only top 20'] = candidates['Rank regression, factors only'][3]
                     frame['score:LambdaRank top 20'] = candidates['LambdaRank'][3]
+                    frame['score:Factor composite top 20'] = candidates['Factor composite'][3]
                 backtest_frames.append(frame)
 
     metrics = pd.DataFrame(metric_rows)
