@@ -50,7 +50,7 @@ def main():
     # 1. Fetch daily stock prices
     print_section("stage 1: fetching daily stock prices")
     fetch_script = os.path.join(HERE, 'Cleaner', 'daily_fetch.py')
-    cmd_fetch = [PYTHON_EXE, fetch_script, '--days', '15', '--workers', '10']
+    cmd_fetch = [PYTHON_EXE, fetch_script, '--workers', '10']  # resumes from each ticker's last stored date
     
     print(f"Running: {' '.join(cmd_fetch)}")
     t0 = datetime.now()
@@ -59,7 +59,14 @@ def main():
     if res_fetch.returncode != 0:
         print(f"\n[ERROR] Daily price fetch failed with exit code {res_fetch.returncode}. Aborting.")
         sys.exit(res_fetch.returncode)
-    
+
+    # Repair Yahoo data errors (fake holiday rows, unadjusted splits and demergers)
+    clean_script = os.path.join(HERE, 'Cleaner', 'clean_prices.py')
+    res_clean = subprocess.run([PYTHON_EXE, clean_script], cwd=HERE)
+    if res_clean.returncode != 0:
+        print(f"\n[ERROR] Price cleaning failed with exit code {res_clean.returncode}. Aborting.")
+        sys.exit(res_clean.returncode)
+
     print(f"Stage 1 complete. Elapsed: {(datetime.now() - t0).total_seconds():.1f}s.")
     
     # 2. Check if retraining is needed

@@ -24,6 +24,17 @@ DB_NAME = os.environ.get("DB_NAME", "stock_predict")
 DB_USER = os.environ.get("DB_USER", "postgres")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "postgres")
 
+# First date of the training history; used for tickers with no stored rows
+HISTORY_START = "2020-09-01"
+
+# Yahoo symbols that differ from our ticker names. Tickers keep their original names in the
+# database (the trained models know them); Yahoo moved the full history to the new symbols.
+YF_SYMBOL_OVERRIDES = {
+    "NIFTY50": "^NSEI",
+    "TATAMOTORS": "TMPV.NS",  # Tata Motors Passenger Vehicles after the 2025 demerger
+    "LTIM": "LTM.NS",         # LTIMindtree renamed
+}
+
 def get_db_connection():
     return psycopg2.connect(
         host=DB_HOST,
@@ -39,7 +50,7 @@ def fetch_single_ticker(ticker: str, start_date: str, end_date: str):
     Returns a list of records ready for database insert.
     """
     # Map ticker to yfinance symbol
-    yf_symbol = "^NSEI" if ticker == "NIFTY50" else f"{ticker}.NS"
+    yf_symbol = YF_SYMBOL_OVERRIDES.get(ticker, f"{ticker}.NS")
     try:
         df = yf.download(
             tickers=yf_symbol,
@@ -94,15 +105,14 @@ def fetch_single_ticker(ticker: str, start_date: str, end_date: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch daily stock prices and update market_data_daily.")
-    parser.add_argument('--days', type=int, default=15, help="Number of trailing days to fetch (default: 15).")
+    parser.add_argument('--days', type=int, default=None,
+                        help="Fetch this many trailing days for every ticker. Default: resume each ticker "
+                             "from its last stored date, so gaps from missed runs are back-filled.")
     parser.add_argument('--workers', type=int, default=10, help="Number of parallel fetch threads (default: 10).")
+    parser.add_argument('--tickers', nargs='+', default=None, help="Only fetch these tickers (default: all active).")
     args = parser.parse_args()
 
-    # Calculate date range
     end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=args.days)).strftime('%Y-%m-%d')
-    
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] Starting daily fetch from {start_date} to {end_date}")
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -110,10 +120,30 @@ def main():
     # Get active tickers
     cursor.execute("SELECT ticker FROM companies WHERE is_active = TRUE")
     tickers = [row[0] for row in cursor.fetchall()]
-    
+
     # Ensure NIFTY50 is processed
     if "NIFTY50" not in tickers:
         tickers.append("NIFTY50")
+
+    if args.tickers:
+        tickers = [t for t in tickers if t in set(args.tickers)]
+
+    # Per-ticker start date: last stored date minus a 5-day overlap (re-fetches recent revisions),
+    # or the full history start for tickers with no rows yet.
+    cursor.execute("SELECT ticker, MAX(date) FROM market_data_daily GROUP BY ticker")
+    last_dates = dict(cursor.fetchall())
+
+    def start_for(ticker):
+        if args.days is not None:
+            return (datetime.now() - timedelta(days=args.days)).strftime('%Y-%m-%d')
+        last = last_dates.get(ticker)
+        if last is None:
+            return HISTORY_START
+        return (last - timedelta(days=5)).strftime('%Y-%m-%d')
+
+    starts = {t: start_for(t) for t in tickers}
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] Starting daily fetch up to {end_date}; "
+          f"earliest start {min(starts.values())}, latest start {max(starts.values())}")
 
     print(f"Found {len(tickers)} active tickers to fetch.")
 
@@ -125,7 +155,7 @@ def main():
     # Fetch data concurrently
     print(f"Fetching data using {args.workers} threads...")
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(fetch_single_ticker, ticker, start_date, end_date): ticker for ticker in tickers}
+        futures = {executor.submit(fetch_single_ticker, ticker, starts[ticker], end_date): ticker for ticker in tickers}
         
         for future in as_completed(futures):
             ticker = futures[future]

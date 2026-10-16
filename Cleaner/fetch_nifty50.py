@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import yfinance as yf
@@ -46,7 +47,8 @@ def main():
 
         # 2. Download ^NSEI historical data via yfinance
         print("Downloading NIFTY 50 index (^NSEI) from yfinance...")
-        df = yf.download("^NSEI", start="2020-09-01", end="2025-10-01")
+        end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        df = yf.download("^NSEI", start="2020-09-01", end=end_date)
         if df.empty:
             print("❌ Error: Downloaded dataframe is empty. Please check internet connection or ticker.")
             sys.exit(1)
