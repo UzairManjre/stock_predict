@@ -1437,6 +1437,63 @@ elif nav == "🎯  Accuracy":
     st.markdown('<div style="font-size:1.6rem;font-weight:800;margin-bottom:4px;">Was the AI Right?</div>', unsafe_allow_html=True)
     st.markdown('<div style="color:#8896b3;font-size:0.85rem;margin-bottom:28px;">Every week we check: did the stocks the AI said would go up, actually go up? Here are the real results.</div>', unsafe_allow_html=True)
 
+    # ── Headline: live hit rates of the top 20 (accuracy_checker.py → headline_hit_rates) ──
+    st.markdown('<div class="section-header"><h2>Live Tracking: Did Our Top 20 Beat the Market?</h2>'
+                '<span class="section-badge">Headline metric</span></div>', unsafe_allow_html=True)
+    table_exists = query("SELECT to_regclass('headline_hit_rates') IS NOT NULL AS ok")
+    live = pd.DataFrame()
+    if not table_exists.empty and bool(table_exists['ok'].iloc[0]):
+        live = query("""
+            SELECT batch_date, horizon_days, ranking, high_confidence, stocks,
+                   top20_excess, avg_excess, beat_average, beat_nifty
+            FROM headline_hit_rates ORDER BY batch_date DESC, horizon_days, ranking
+        """)
+    pending = query("""
+        SELECT COUNT(DISTINCT generated_at::date) AS days, MIN(generated_at)::date AS first_day
+        FROM predictions WHERE horizon = '21d' AND blend_rank IS NOT NULL
+    """)
+    reference = {
+        (21, 'blend', 'All days'): '68%', (21, 'blend', 'High-confidence days'): '74%',
+        (21, 'momentum', 'All days'): '66%',
+    }
+    if live.empty:
+        first = pending['first_day'].iloc[0] if not pending.empty and pending['days'].iloc[0] else None
+        st.info("**Live tracking is on; no forecast has completed its horizon yet.** "
+                + (f"Forecasts with the final model are being recorded since {first:%d %b %Y}. " if first else "")
+                + "A forecast is scored 5 and 21 trading sessions after it is made, so the first 5-day results "
+                "appear about a week after the first forecast and the first 21-day results about a month after. "
+                "Walk-forward reference (Mar 2025 – Sep 2026, 21 days): the final model's top 20 beat the NIFTY 50 "
+                "on 68% of days, and on 74% of high-confidence days.")
+    else:
+        rows = []
+        for (h, ranking), g in live.groupby(['horizon_days', 'ranking']):
+            parts = [('All days', g)]
+            if ranking == 'blend':
+                parts.append(('High-confidence days', g[g['high_confidence'] == True]))
+            for label, part in parts:
+                if part.empty:
+                    continue
+                rows.append({
+                    'Ranking': 'Final model' if ranking == 'blend' else 'Momentum 12-1',
+                    'Horizon': f'{h} sessions', 'Days': label, 'Forecasts scored': len(part),
+                    'Beat the NIFTY 50': f"{part['beat_nifty'].mean():.0%}",
+                    'Beat the average stock': f"{part['beat_average'].mean():.0%}",
+                    'Avg edge vs average stock': f"{(part['top20_excess'] - part['avg_excess']).mean() * 100:+.2f}%",
+                    'Walk-forward test': reference.get((h, ranking, label), '—'),
+                })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("Each forecast day's top 20 (equal weight) is compared with the NIFTY 50 and with the average of all "
+                   "stocks over the next 5 or 21 sessions. Random picks would beat the NIFTY about half the time. "
+                   "Fewer than ~20 scored 21-day forecasts is too few to judge.")
+        recent = live.head(20).copy()
+        recent['Confidence'] = recent['high_confidence'].map({True: 'High', False: 'Normal'}).fillna('—')
+        recent['Top 20 vs NIFTY'] = recent['top20_excess'].map(lambda x: f"{np.expm1(x) * 100:+.2f}%")
+        recent['Result'] = recent['beat_nifty'].map({1: '✓ beat NIFTY', 0: '✗ lagged NIFTY'})
+        recent = recent.rename(columns={'batch_date': 'Forecast date', 'horizon_days': 'Sessions', 'ranking': 'Ranking'})
+        with st.expander("Latest scored forecasts"):
+            st.dataframe(recent[['Forecast date', 'Sessions', 'Ranking', 'Confidence', 'Top 20 vs NIFTY', 'Result']],
+                         use_container_width=True, hide_index=True)
+
     # ── Overall aggregate KPIs ────────────────────────────────────────────────
     agg_df = query("""
         SELECT

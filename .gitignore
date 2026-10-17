@@ -31,3 +31,6 @@ bse_screenshot.png
 
 # CatBoost training logs
 catboost_info/
+
+# Live-tracking run logs
+logs/

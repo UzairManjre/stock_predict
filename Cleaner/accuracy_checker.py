@@ -434,6 +434,14 @@ def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
             continue
         prices['date'] = pd.to_datetime(prices['date'])
         pivot = prices.pivot(index='date', columns='ticker', values='adj_close').astype(float).sort_index()
+        # Key results by the market session the forecast was made from, so two runs on one session
+        # (or a weekend re-run) are scored once
+        sessions = pivot['NIFTY50'].dropna().index if 'NIFTY50' in pivot.columns else pivot.index
+        made_from = sessions[sessions <= pd.Timestamp(batch_date)]
+        if len(made_from) == 0:
+            continue
+        batch_date = made_from.max().date()
+        todo = [h for h in todo if any((batch_date, h, k) not in done for k in rankings)]
         for h in todo:
             nifty_base, nifty_end = get_nth_trading_day_price(pivot, 'NIFTY50', batch_date, n=h)
             if nifty_base is None:
@@ -464,6 +472,7 @@ def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
                       int(top > 0), high if ranking == 'blend' else None))
                 conn.commit()
                 cur.close()
+                done.add((batch_date, h, ranking))
                 written += 1
     return written
 
