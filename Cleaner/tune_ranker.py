@@ -15,10 +15,18 @@ Protocol (so the walk-forward test stays an honest, one-shot check):
      with a fixed number of rounds) and adds their test scores to the saved predictions, so
      ensemble_study.py can blend them.
 
-Outputs results/tuning_21d/. Usage:
-    python Cleaner/tune_ranker.py [--trials 60] [--horizon 21]
+Run 2 (the sturdier search) adds: more folds (--folds 5, back to mid-2022), a heavier penalty
+on spread across folds (--penalty 1.0), and the average of the top-k settings instead of the
+single best (--top-k 10). A candidate joins the blend only if its fold score beats the untuned
+rank regression's; that gate is decided before the test is scored (gate_passed in best_params.json).
+
+Outputs results/tuning_21d/ (or --out). Usage:
+    python Cleaner/tune_ranker.py [--trials 100] [--horizon 21]
     python Cleaner/tune_ranker.py --evaluate          # after tuning
     python Cleaner/ensemble_study.py --dir results/tuning_21d --horizon 21 --extra "Tuned LightGBM" "CatBoost"
+    # run 2:
+    python Cleaner/tune_ranker.py --folds 5 --penalty 1.0 --top-k 10 --out results/tuning_21d_v2
+    python Cleaner/tune_ranker.py --folds 5 --penalty 1.0 --top-k 10 --out results/tuning_21d_v2 --evaluate
 """
 
 import os
@@ -56,14 +64,14 @@ CATBOOST_GRID = [
 
 # ─── Folds ────────────────────────────────────────────────────────────────────
 
-def make_folds(sessions, horizon):
+def make_folds(sessions, horizon, n_folds=N_FOLDS):
     """Tuning blocks that end before the first walk-forward test window, with embargoes."""
     first_test = make_windows(sessions, 6, 63, horizon)[0]['test'][0]
     test_idx = int(np.searchsorted(sessions, first_test))
     last_val_end = test_idx - horizon          # exclusive: val targets end before the test starts
     folds = []
-    for k in range(N_FOLDS):
-        val_end = last_val_end - (N_FOLDS - 1 - k) * FOLD_SIZE
+    for k in range(n_folds):
+        val_end = last_val_end - (n_folds - 1 - k) * FOLD_SIZE
         val_start = val_end - FOLD_SIZE
         train_end = val_start - horizon
         folds.append({'fold': k + 1, 'train_end': sessions[train_end - 1],
@@ -131,7 +139,7 @@ def suggest(trial):
     }
 
 
-def run_search(df, folds, h, n_trials):
+def run_search(df, folds, h, n_trials, penalty):
     target, target_raw = f'xs_target_{h}d', f'target_{h}d'
     frames = [fold_frames(df, f, target) for f in folds]
 
@@ -148,7 +156,7 @@ def run_search(df, folds, h, n_trials):
                 raise optuna.TrialPruned()
         trial.set_user_attr('fold_ic', ics)
         trial.set_user_attr('fold_hit', hits)
-        return float(np.mean(ics) - 0.5 * np.std(ics))
+        return float(np.mean(ics) - penalty * np.std(ics))
 
     study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=42),
                                 pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=1))
@@ -182,11 +190,30 @@ def baselines(df, folds, h):
     return pd.DataFrame(rows)
 
 
+def fold_score_of_average(df, folds, h, settings, penalty):
+    """Fold IC of the average prediction of several LightGBM settings (the top-k model)."""
+    target, target_raw = f'xs_target_{h}d', f'target_{h}d'
+    ics, hits = [], []
+    for f in folds:
+        train, val = fold_frames(df, f, target)
+        pred = np.mean([fit_predict_lgb(p, train, val, target) for p in settings], axis=0)
+        ic, hit = score(val, pred, target_raw)
+        ics.append(ic)
+        hits.append(hit)
+    return float(np.mean(ics) - penalty * np.std(ics)), ics, hits
+
+
+def fit_predict_lgb(p, train, test, target):
+    model, features = fit_lgb(p, train, target)
+    return model.predict(test[features])
+
+
 # ─── Walk-forward check of the chosen settings ────────────────────────────────
 
 def evaluate_chosen(df, sessions, h):
     target = f'xs_target_{h}d'
     best = json.load(open(os.path.join(OUT_DIR, 'best_params.json')))
+    lgb_settings = best.get('lightgbm_top', [best['lightgbm']])
     preds = pd.read_parquet(os.path.join(WALK_FORWARD_DIR, 'test_predictions.parquet'))
     preds = preds[preds['horizon'] == h].copy()
     preds['date'] = pd.to_datetime(preds['date'])
@@ -195,11 +222,11 @@ def evaluate_chosen(df, sessions, h):
         # Fixed rounds need no early-stopping slice: train on everything up to the embargo
         train = df[df['date'] <= w['early_stop'][1]].dropna(subset=[target])
         test = between(df, w['test']).dropna(subset=[f'target_{h}d'])
-        model, features = fit_lgb(best['lightgbm'], train, target)
+        tuned = np.mean([fit_predict_lgb(p, train, test, target) for p in lgb_settings], axis=0)
         cat_model, cat_features = fit_catboost(best['catboost'], train, target)
         frames.append(pd.DataFrame({'date': pd.to_datetime(test['date'].to_numpy()),
                                     'ticker': test['ticker'].astype(str).to_numpy(),
-                                    'Tuned LightGBM': model.predict(test[features]),
+                                    'Tuned LightGBM': tuned,
                                     'CatBoost': predict_catboost(cat_model, cat_features, test)}))
         print(f"  window {w['window']}: trained to {pd.Timestamp(w['early_stop'][1]).date()}, "
               f"scored {len(test)} rows", flush=True)
@@ -207,15 +234,23 @@ def evaluate_chosen(df, sessions, h):
     merged = preds.merge(new, on=['date', 'ticker'], how='left')
     merged.to_parquet(os.path.join(OUT_DIR, 'test_predictions.parquet'), index=False)
     print(f"Saved {os.path.join(OUT_DIR, 'test_predictions.parquet')} ({merged['Tuned LightGBM'].notna().sum()} tuned scores)")
+    if 'gate_passed' in best:
+        print(f"Blend members decided before the test: {best['gate_passed']}")
 
 
 def main():
+    global OUT_DIR
     parser = argparse.ArgumentParser(description="Tune 21-day rankers on pre-test folds only.")
     parser.add_argument('--parquet', default=DEFAULT_PARQUET)
     parser.add_argument('--horizon', type=int, default=21)
     parser.add_argument('--trials', type=int, default=60)
     parser.add_argument('--evaluate', action='store_true', help='Score the chosen settings on the walk-forward windows')
+    parser.add_argument('--folds', type=int, default=N_FOLDS, help='Number of 126-session tuning folds')
+    parser.add_argument('--penalty', type=float, default=0.5, help='Score = mean fold IC - penalty x its spread')
+    parser.add_argument('--top-k', type=int, default=1, help='Average the k best settings instead of taking the best')
+    parser.add_argument('--out', default=OUT_DIR)
     args = parser.parse_args()
+    OUT_DIR = os.path.abspath(args.out)
     os.makedirs(OUT_DIR, exist_ok=True)
     h = args.horizon
 
@@ -225,7 +260,7 @@ def main():
         evaluate_chosen(df, sessions, h)
         return
 
-    folds = make_folds(sessions, h)
+    folds = make_folds(sessions, h, args.folds)
     for f in folds:
         print(f"Fold {f['fold']}: train to {pd.Timestamp(f['train_end']).date()}, "
               f"validate {pd.Timestamp(f['val'][0]).date()} to {pd.Timestamp(f['val'][1]).date()}")
@@ -235,30 +270,44 @@ def main():
     base.to_csv(os.path.join(OUT_DIR, 'baselines.csv'), index=False)
 
     print(f"\nOptuna search, {args.trials} trials...")
-    study = run_search(df, folds, h, args.trials)
+    study = run_search(df, folds, h, args.trials, args.penalty)
     trials = study.trials_dataframe()
     trials.to_csv(os.path.join(OUT_DIR, 'trials.csv'), index=False)
 
     best_trial = study.best_trial
     lgb_best = {**best_trial.params}
-    cat_scores = {i: base[f'catboost{i}_ic'].mean() - 0.5 * base[f'catboost{i}_ic'].std(ddof=0)
+    complete = sorted([t for t in study.trials if t.value is not None], key=lambda t: t.value, reverse=True)
+    lgb_top = [{**t.params} for t in complete[:args.top_k]]
+    pen = args.penalty
+    cat_scores = {i: base[f'catboost{i}_ic'].mean() - pen * base[f'catboost{i}_ic'].std(ddof=0)
                   for i in range(len(CATBOOST_GRID))}
     cat_best = CATBOOST_GRID[max(cat_scores, key=cat_scores.get)]
-    untuned = base['untuned_ic'].mean() - 0.5 * base['untuned_ic'].std(ddof=0)
+    untuned = base['untuned_ic'].mean() - pen * base['untuned_ic'].std(ddof=0)
+    if args.top_k > 1:
+        print(f"\nScoring the average of the top {args.top_k} settings on the folds...")
+        tuned_score, tuned_ics, tuned_hits = fold_score_of_average(df, folds, h, lgb_top, pen)
+    else:
+        tuned_score, tuned_ics, tuned_hits = study.best_value, best_trial.user_attrs['fold_ic'], best_trial.user_attrs['fold_hit']
     summary = {
-        'lightgbm': lgb_best, 'catboost': cat_best,
-        'scores': {'tuned_lightgbm': study.best_value, 'best_catboost': max(cat_scores.values()),
+        'lightgbm': lgb_best, 'lightgbm_top': lgb_top, 'catboost': cat_best,
+        'penalty': pen, 'top_k': args.top_k,
+        'scores': {'tuned_lightgbm': float(tuned_score), 'best_catboost': float(max(cat_scores.values())),
                    'untuned_rank_regression': float(untuned),
-                   'momentum': float(base['momentum_ic'].mean() - 0.5 * base['momentum_ic'].std(ddof=0))},
-        'tuned_fold_ic': best_trial.user_attrs['fold_ic'], 'tuned_fold_hit': best_trial.user_attrs['fold_hit'],
+                   'momentum': float(base['momentum_ic'].mean() - pen * base['momentum_ic'].std(ddof=0))},
+        # Decided here, before any test score exists: a candidate joins the blend only if it beats
+        # the untuned rank regression on the tuning folds
+        'gate_passed': {'Tuned LightGBM': bool(tuned_score > untuned),
+                        'CatBoost': bool(max(cat_scores.values()) > untuned)},
+        'tuned_fold_ic': tuned_ics, 'tuned_fold_hit': tuned_hits,
         'folds': [{'fold': f['fold'], 'train_end': str(pd.Timestamp(f['train_end']).date()),
                    'val': [str(pd.Timestamp(v).date()) for v in f['val']]} for f in folds],
         'trials': len(study.trials),
     }
     json.dump(summary, open(os.path.join(OUT_DIR, 'best_params.json'), 'w'), indent=2)
-    print("\nScore = mean fold IC - half its spread (higher is better):")
+    print(f"\nScore = mean fold IC - {pen:g} x its spread (higher is better):")
     for k, v in summary['scores'].items():
         print(f"  {k:26s} {v:.4f}")
+    print(f"Gate (beats untuned rank regression on the folds): {summary['gate_passed']}")
     print(f"Best LightGBM settings: {lgb_best}")
     print(f"Best CatBoost settings: {cat_best}")
     print(f"\nResults written to {OUT_DIR}")

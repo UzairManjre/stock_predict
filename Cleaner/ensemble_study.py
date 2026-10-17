@@ -119,7 +119,7 @@ def main():
     # Gate 1: average each stock's blended score over its last SMOOTH_DAYS sessions to cut turnover
     d = d.sort_values(['ticker', 'date'])
     smoothed = []
-    for name in SMOOTHED:
+    for name in SMOOTHED + [n for n in blends if n.startswith('4 models + ')]:
         d[f'{name}, smoothed'] = d.groupby('ticker')[name].transform(lambda x: x.rolling(SMOOTH_DAYS, min_periods=1).mean())
         smoothed.append(f'{name}, smoothed')
 

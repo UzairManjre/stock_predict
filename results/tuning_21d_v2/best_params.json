@@ -1,0 +1,222 @@
+{
+  "lightgbm": {
+    "feature_set": "factors only",
+    "num_rounds": 55,
+    "learning_rate": 0.008328782455072748,
+    "num_leaves": 7,
+    "min_data_in_leaf": 419,
+    "feature_fraction": 0.8947423197469815,
+    "bagging_fraction": 0.6254839780812907,
+    "lambda_l1": 0.0010098944419384324,
+    "lambda_l2": 0.028312775172296006,
+    "max_bin": 63,
+    "extra_trees": false
+  },
+  "lightgbm_top": [
+    {
+      "feature_set": "factors only",
+      "num_rounds": 50,
+      "learning_rate": 0.007109728820518828,
+      "num_leaves": 18,
+      "min_data_in_leaf": 231,
+      "feature_fraction": 0.8255527330303184,
+      "bagging_fraction": 0.4144982177313689,
+      "lambda_l1": 0.02274277636447241,
+      "lambda_l2": 0.28876825289145847,
+      "max_bin": 63,
+      "extra_trees": false
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 59,
+      "learning_rate": 0.005861470591689977,
+      "num_leaves": 22,
+      "min_data_in_leaf": 146,
+      "feature_fraction": 0.8281353689559438,
+      "bagging_fraction": 0.4005556189121388,
+      "lambda_l1": 0.003892368860540273,
+      "lambda_l2": 0.08046053417697484,
+      "max_bin": 63,
+      "extra_trees": false
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 107,
+      "learning_rate": 0.00754589334161778,
+      "num_leaves": 10,
+      "min_data_in_leaf": 200,
+      "feature_fraction": 0.844620055673403,
+      "bagging_fraction": 0.6124039016673091,
+      "lambda_l1": 0.016579750703591786,
+      "lambda_l2": 0.018996197375817713,
+      "max_bin": 63,
+      "extra_trees": true
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 152,
+      "learning_rate": 0.005653535291464968,
+      "num_leaves": 14,
+      "min_data_in_leaf": 150,
+      "feature_fraction": 0.8989661827541968,
+      "bagging_fraction": 0.563008375997421,
+      "lambda_l1": 0.008689371851701442,
+      "lambda_l2": 0.043643626559080016,
+      "max_bin": 63,
+      "extra_trees": false
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 120,
+      "learning_rate": 0.005001380479327718,
+      "num_leaves": 12,
+      "min_data_in_leaf": 103,
+      "feature_fraction": 0.8722181637458319,
+      "bagging_fraction": 0.5125641988888796,
+      "lambda_l1": 0.002280145100297599,
+      "lambda_l2": 0.025291084346300202,
+      "max_bin": 63,
+      "extra_trees": true
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 53,
+      "learning_rate": 0.009473790233526286,
+      "num_leaves": 7,
+      "min_data_in_leaf": 455,
+      "feature_fraction": 0.8981751616045093,
+      "bagging_fraction": 0.6824918645654369,
+      "lambda_l1": 0.0010444661761006592,
+      "lambda_l2": 0.0574938810916188,
+      "max_bin": 63,
+      "extra_trees": true
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 90,
+      "learning_rate": 0.035600631936402935,
+      "num_leaves": 13,
+      "min_data_in_leaf": 130,
+      "feature_fraction": 0.6745817929723728,
+      "bagging_fraction": 0.531803169711998,
+      "lambda_l1": 0.019219652888662637,
+      "lambda_l2": 0.015370852728004666,
+      "max_bin": 63,
+      "extra_trees": false
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 81,
+      "learning_rate": 0.006760864249958702,
+      "num_leaves": 21,
+      "min_data_in_leaf": 126,
+      "feature_fraction": 0.8668496790635406,
+      "bagging_fraction": 0.45604348592319005,
+      "lambda_l1": 0.006995945302780308,
+      "lambda_l2": 0.23374412616718138,
+      "max_bin": 63,
+      "extra_trees": false
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 59,
+      "learning_rate": 0.005473106946582547,
+      "num_leaves": 25,
+      "min_data_in_leaf": 113,
+      "feature_fraction": 0.7419319355966664,
+      "bagging_fraction": 0.43814283262996767,
+      "lambda_l1": 0.009105419449307442,
+      "lambda_l2": 1.4508166514533176,
+      "max_bin": 63,
+      "extra_trees": true
+    },
+    {
+      "feature_set": "factors only",
+      "num_rounds": 1054,
+      "learning_rate": 0.005006211342310056,
+      "num_leaves": 11,
+      "min_data_in_leaf": 131,
+      "feature_fraction": 0.7949862513286455,
+      "bagging_fraction": 0.5717253424689651,
+      "lambda_l1": 0.004632216620945178,
+      "lambda_l2": 0.054855468789261654,
+      "max_bin": 63,
+      "extra_trees": false
+    }
+  ],
+  "catboost": {
+    "depth": 6,
+    "learning_rate": 0.03,
+    "l2_leaf_reg": 10,
+    "iterations": 800
+  },
+  "penalty": 1.0,
+  "top_k": 10,
+  "scores": {
+    "tuned_lightgbm": -0.024303082557968023,
+    "best_catboost": -0.04100230437022326,
+    "untuned_rank_regression": -0.00810744298171319,
+    "momentum": -0.041465720207459034
+  },
+  "gate_passed": {
+    "Tuned LightGBM": false,
+    "CatBoost": false
+  },
+  "tuned_fold_ic": [
+    0.06258162663945854,
+    0.06658588123579483,
+    0.05082089581027836,
+    0.08005143139399186,
+    -0.08262229625011579
+  ],
+  "tuned_fold_hit": [
+    0.6111111111111112,
+    0.9365079365079365,
+    0.6587301587301587,
+    0.8015873015873016,
+    0.6031746031746031
+  ],
+  "folds": [
+    {
+      "fold": 1,
+      "train_end": "2022-06-15",
+      "val": [
+        "2022-07-15",
+        "2023-01-16"
+      ]
+    },
+    {
+      "fold": 2,
+      "train_end": "2022-12-16",
+      "val": [
+        "2023-01-17",
+        "2023-07-21"
+      ]
+    },
+    {
+      "fold": 3,
+      "train_end": "2023-06-21",
+      "val": [
+        "2023-07-24",
+        "2024-01-25"
+      ]
+    },
+    {
+      "fold": 4,
+      "train_end": "2023-12-26",
+      "val": [
+        "2024-01-29",
+        "2024-08-02"
+      ]
+    },
+    {
+      "fold": 5,
+      "train_end": "2024-07-03",
+      "val": [
+        "2024-08-05",
+        "2025-02-01"
+      ]
+    }
+  ],
+  "trials": 100
+}
