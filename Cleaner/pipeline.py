@@ -46,12 +46,13 @@ if sys.stderr.encoding is None or sys.stderr.encoding.lower() != "utf-8":
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-STAGE_ORDER = ['features', 'tune', 'train', 'predict', 'drift']
+STAGE_ORDER = ['features', 'tune', 'train', 'final', 'predict', 'drift']
 
 STAGE_SCRIPTS = {
     'features': os.path.join(HERE, 'build_features.py'),
     'tune':     os.path.join(HERE, 'tune_tft.py'),
     'train':    os.path.join(HERE, 'train_tft.py'),
+    'final':    os.path.join(HERE, 'final_model.py'),   # frozen 21-day blend (--train)
     'predict':  os.path.join(HERE, 'predict.py'),
     'drift':    os.path.join(HERE, 'predict.py'),   # same script, different flag
 }
@@ -142,6 +143,7 @@ def main():
         'features': [],
         'tune':     [],
         'train':    train_args,
+        'final':    ['--train'],
         'predict':  predict_args,
         'drift':    predict_args,   # drift uses predict.py flags
     }

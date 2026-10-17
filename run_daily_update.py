@@ -86,7 +86,7 @@ def main():
         print(f"\n[ORCHESTRATOR] Latest model checkpoint is {days_elapsed} days old (< retrain interval of {args.retrain_interval} days). Skipping training stage.")
 
     # Determine pipeline stages
-    stages = ['features', 'train', 'predict', 'drift'] if should_retrain else ['features', 'predict', 'drift']
+    stages = ['features', 'train', 'final', 'predict', 'drift'] if should_retrain else ['features', 'predict', 'drift']
     
     # 3. Run TFT pipeline
     print_section("stage 2: running features, prediction, and drift pipeline")

@@ -329,6 +329,7 @@ def load_latest_predictions(horizon="5d"):
                p.q10_return, p.q50_return, p.q90_return,
                p.spread, p.signal_strength, p.generated_at,
                p.momentum_12_1, p.momentum_rank,
+               p.blend_score, p.blend_rank, p.blend_date, p.model_agreement, p.agreement_threshold, p.high_confidence,
                COALESCE(m.current_price, 0.0) AS current_price
         FROM predictions p
         LEFT JOIN companies c ON p.ticker = c.ticker
@@ -746,13 +747,32 @@ elif nav == "📈  Top Picks":
     if preds_df.empty:
         st.warning("No predictions in database. Run `run_daily_update.py` first.")
     else:
+        # Final model's confidence for the day (final_model.py)
+        flag = preds_df['high_confidence'].dropna()
+        if len(flag):
+            day = preds_df.dropna(subset=['high_confidence']).iloc[0]
+            when = pd.Timestamp(day['blend_date']).strftime('%d %b %Y') if pd.notna(day['blend_date']) else 'latest session'
+            agreement = (f"model agreement {day['model_agreement']:.2f} vs a recent median of {day['agreement_threshold']:.2f}"
+                         if pd.notna(day['agreement_threshold']) else f"model agreement {day['model_agreement']:.2f}")
+            if bool(flag.iloc[0]):
+                st.success(f"**High-confidence day ({when})**: {agreement}. On such days in the walk-forward test "
+                           "(Mar 2025 – Sep 2026), the final model's top 20 beat the NIFTY 50 over the next 21 sessions "
+                           "74% of the time, against 68% on all days.")
+            else:
+                st.info(f"**Normal-confidence day ({when})**: {agreement}. Across all test days the final model's "
+                        "top 20 beat the NIFTY 50 over 21 sessions 68% of the time; on high-confidence days, 74%.")
+
         # Filters
         col_f0, col_f1, col_f2, col_f3 = st.columns([2, 1.5, 2, 1])
         with col_f0:
+            rank_options = ["Model forecast (q50)", "Momentum 12-1"]
+            if preds_df['blend_rank'].notna().any():
+                rank_options = ["Final model (21-day blend)"] + rank_options
             rank_by = st.selectbox(
-                "Rank by", ["Model forecast (q50)", "Momentum 12-1"],
-                help="In walk-forward tests (Mar 2025 – Oct 2026), a weekly top-20 by 12-1 month momentum "
-                     "returned +27.4% after costs, vs −2.7% for ranking by the model's forecast.")
+                "Rank by", rank_options,
+                help="Final model: equal-weight blend of momentum, rank regression, LightGBM and each stock's "
+                     "history, smoothed over 5 sessions; its top 20 beat the NIFTY over 21 sessions on 68% of "
+                     "walk-forward test days. Momentum alone: +27.4% after costs, weekly, vs −2.7% for the q50 forecast.")
         with col_f1:
             signal_filter = st.selectbox("Signal Filter", ["All", "Strong Buy", "Buy", "Neutral", "Sell"])
         with col_f2:
@@ -764,6 +784,8 @@ elif nav == "📈  Top Picks":
         df = preds_df.copy()
         if rank_by == "Momentum 12-1":
             df = df.sort_values('momentum_rank', na_position='last')
+        elif rank_by == "Final model (21-day blend)":
+            df = df.sort_values('blend_rank', na_position='last')
         df['signal_label'] = df.apply(lambda r: signal_label(r['q50_return'], r['signal_strength'])[0], axis=1)
 
         if signal_filter != "All":
@@ -819,10 +841,11 @@ elif nav == "📈  Top Picks":
         # momentum_12_1 is a log return; show it as a simple percentage
         disp['Momentum 12-1'] = disp['momentum_12_1'].map(lambda x: f"{np.expm1(x) * 100:+.1f}%" if pd.notna(x) else "—")
         disp['Momentum Rank'] = disp['momentum_rank'].map(lambda x: f"{int(x)}" if pd.notna(x) else "—")
+        disp['Final Rank'] = disp['blend_rank'].map(lambda x: f"{int(x)}" if pd.notna(x) else "—")
         disp = disp.rename(columns={'ticker': 'Ticker', 'company_name': 'Company', 'sector': 'Sector', 'signal_label': 'Signal'})
 
         st.dataframe(
-            disp[['Ticker', 'Company', 'Sector', 'Signal', 'Current Price', 'Safe Alpha', 'Confidence', 'Expected Return (Q50) ▲', 'Signal Str.', 'Momentum 12-1', 'Momentum Rank']],
+            disp[['Ticker', 'Company', 'Sector', 'Final Rank', 'Signal', 'Current Price', 'Safe Alpha', 'Confidence', 'Expected Return (Q50) ▲', 'Signal Str.', 'Momentum 12-1', 'Momentum Rank']],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -833,6 +856,7 @@ elif nav == "📈  Top Picks":
                 "Signal Str.": st.column_config.TextColumn(help="Sharpe-like signal: Q50 / spread"),
                 "Momentum 12-1": st.column_config.TextColumn(help="Return from 12 months ago to 1 month ago"),
                 "Momentum Rank": st.column_config.TextColumn(help="Rank among all stocks by 12-1 momentum (1 = strongest)"),
+                "Final Rank": st.column_config.TextColumn(help="Rank by the final model's 21-day blend (1 = top pick)"),
             }
         )
 

@@ -1,0 +1,16 @@
+{
+  "members": [
+    "Momentum 12-1",
+    "Rank regression",
+    "LightGBM",
+    "Per-stock history"
+  ],
+  "horizon": 21,
+  "smooth_days": 5,
+  "top_n": 20,
+  "agreement_lookback": 126,
+  "trained_to": "2026-06-17",
+  "ranker_rounds": 8,
+  "lgbm_rounds": 8,
+  "trained_at": "2026-10-17T12:14:16"
+}

@@ -510,6 +510,30 @@ def run_inference(df: pd.DataFrame, checkpoint_path: str) -> pd.DataFrame:
     return results
 
 
+# ─── Final model: frozen 21-day blend and the day's confidence flag ───────────
+
+def add_final_model(results: pd.DataFrame, record: bool) -> pd.DataFrame:
+    """Adds final_model.py's blend score and rank to every row, plus the day's model agreement,
+    threshold and high-confidence flag. Skipped with a warning if its artifacts are missing."""
+    try:
+        import final_model
+        if not final_model.artifacts_ready():
+            print("[WARN] Final-model artifacts missing; run Cleaner/final_model.py --train. Skipping the blend.")
+            return results
+        picks, day = final_model.score_latest(record=record)
+    except Exception as e:
+        print(f"[WARN] Final-model scoring failed, predictions are written without it: {e}")
+        return results
+    results = results.merge(picks, on='ticker', how='left')
+    results['blend_date'] = pd.Timestamp(day['date']).date()
+    results['model_agreement'] = day['agreement']
+    results['agreement_threshold'] = day['threshold']
+    results['high_confidence'] = day['high_confidence']
+    label = 'HIGH CONFIDENCE' if day['high_confidence'] else 'normal confidence'
+    print(f"Final model ({day['date']}): agreement {day['agreement']:.3f} vs threshold {day['threshold']:.3f} -> {label}")
+    return results
+
+
 # ─── DB write ─────────────────────────────────────────────────────────────────
 
 def write_predictions_to_db(conn, results: pd.DataFrame):
@@ -538,7 +562,13 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
     cur.execute("""
         ALTER TABLE predictions
             ADD COLUMN IF NOT EXISTS momentum_12_1 FLOAT,
-            ADD COLUMN IF NOT EXISTS momentum_rank INTEGER;
+            ADD COLUMN IF NOT EXISTS momentum_rank INTEGER,
+            ADD COLUMN IF NOT EXISTS blend_score FLOAT,
+            ADD COLUMN IF NOT EXISTS blend_rank INTEGER,
+            ADD COLUMN IF NOT EXISTS blend_date DATE,
+            ADD COLUMN IF NOT EXISTS model_agreement FLOAT,
+            ADD COLUMN IF NOT EXISTS agreement_threshold FLOAT,
+            ADD COLUMN IF NOT EXISTS high_confidence BOOLEAN;
     """)
 
     def nullable(value, cast):
@@ -556,6 +586,12 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
             row['signal_strength'],
             nullable(row['momentum_12_1'], float),
             nullable(row['momentum_rank'], int),
+            nullable(row.get('blend_score'), float),
+            nullable(row.get('blend_rank'), int),
+            nullable(row.get('blend_date'), lambda v: v),
+            nullable(row.get('model_agreement'), float),
+            nullable(row.get('agreement_threshold'), float),
+            nullable(row.get('high_confidence'), bool),
         )
         for _, row in results.iterrows()
     ]
@@ -563,7 +599,8 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
     psycopg2.extras.execute_values(cur, """
         INSERT INTO predictions
             (generated_at, ticker, horizon, q10_return, q50_return, q90_return, spread, signal_strength,
-             momentum_12_1, momentum_rank)
+             momentum_12_1, momentum_rank, blend_score, blend_rank, blend_date, model_agreement,
+             agreement_threshold, high_confidence)
         VALUES %s
         ON CONFLICT (generated_at, ticker, horizon) DO UPDATE
             SET q10_return      = EXCLUDED.q10_return,
@@ -572,7 +609,13 @@ def write_predictions_to_db(conn, results: pd.DataFrame):
                 spread          = EXCLUDED.spread,
                 signal_strength = EXCLUDED.signal_strength,
                 momentum_12_1   = EXCLUDED.momentum_12_1,
-                momentum_rank   = EXCLUDED.momentum_rank;
+                momentum_rank   = EXCLUDED.momentum_rank,
+                blend_score     = EXCLUDED.blend_score,
+                blend_rank      = EXCLUDED.blend_rank,
+                blend_date      = EXCLUDED.blend_date,
+                model_agreement = EXCLUDED.model_agreement,
+                agreement_threshold = EXCLUDED.agreement_threshold,
+                high_confidence = EXCLUDED.high_confidence;
     """, rows)
 
     conn.commit()
@@ -659,6 +702,7 @@ def main():
 
     # ── Inference ────────────────────────────────────────────────────────────
     results = run_inference(live_df, checkpoint_path)
+    results = add_final_model(results, record=not args.no_db_write)
 
     # ── Output ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 70)

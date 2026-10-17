@@ -28,3 +28,6 @@ debug_output/
 TATATECH_*.html
 TATATECH_*.png
 bse_screenshot.png
+
+# CatBoost training logs
+catboost_info/

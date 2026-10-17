@@ -128,19 +128,29 @@ CREATE TABLE IF NOT EXISTS prediction_accuracy_summary (
     evaluated_at            TIMESTAMP DEFAULT NOW()
 );
 
--- Headline metric: did the batch's top 20 by 12-1 month momentum beat the average stock / the NIFTY?
+-- Headline metric: did the batch's top 20 (by momentum, or by the final blend) beat the average
+-- stock / the NIFTY? high_confidence is the final model's flag for that day.
 CREATE TABLE IF NOT EXISTS headline_hit_rates (
     batch_date      DATE NOT NULL,
     horizon_days    INT NOT NULL,
+    ranking         TEXT NOT NULL DEFAULT 'momentum',
     generated_at    TIMESTAMP,
     stocks          INT,
     top20_excess    FLOAT,
     avg_excess      FLOAT,
     beat_average    SMALLINT,
     beat_nifty      SMALLINT,
-    evaluated_at    TIMESTAMP DEFAULT NOW(),
-    UNIQUE (batch_date, horizon_days)
+    high_confidence BOOLEAN,
+    evaluated_at    TIMESTAMP DEFAULT NOW()
 );
+-- Tables created before the final model: add its columns and key on the ranking too
+ALTER TABLE headline_hit_rates ADD COLUMN IF NOT EXISTS ranking TEXT NOT NULL DEFAULT 'momentum';
+ALTER TABLE headline_hit_rates ADD COLUMN IF NOT EXISTS high_confidence BOOLEAN;
+ALTER TABLE headline_hit_rates DROP CONSTRAINT IF EXISTS headline_hit_rates_batch_date_horizon_days_key;
+CREATE UNIQUE INDEX IF NOT EXISTS headline_hit_rates_key ON headline_hit_rates (batch_date, horizon_days, ranking);
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS momentum_rank INTEGER;
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS blend_rank INTEGER;
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS high_confidence BOOLEAN;
 
 CREATE INDEX IF NOT EXISTS idx_pred_acc_batch   ON prediction_accuracy(batch_date);
 CREATE INDEX IF NOT EXISTS idx_pred_acc_ticker  ON prediction_accuracy(ticker);
@@ -385,23 +395,25 @@ def evaluate_batch(batch_df: pd.DataFrame, conn) -> tuple:
 # ─── Headline hit rates ───────────────────────────────────────────────────────
 HEADLINE_HORIZONS = (5, 21)
 TOP_N = 20
+RANKINGS = {'momentum': 'momentum_rank', 'blend': 'blend_rank'}   # blend = final_model.py's 21-day blend
 
 
 def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
     """For each day's latest prediction batch, once `h` sessions have passed: did the top 20 stocks
-    by momentum rank beat the average stock and the NIFTY 50 (excess log return > 0)?"""
+    by momentum rank, and by the final blend's rank, beat the average stock and the NIFTY 50?"""
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # The 21d rows carry the final blend; momentum_rank is the same on every horizon
     cur.execute("""
-        SELECT p.generated_at, p.ticker, p.momentum_rank
+        SELECT p.generated_at, p.ticker, p.momentum_rank, p.blend_rank, p.high_confidence
         FROM predictions p
         JOIN (SELECT generated_at::date AS d, MAX(generated_at) AS latest
-              FROM predictions WHERE horizon = '5d' AND momentum_rank IS NOT NULL
+              FROM predictions WHERE horizon = '21d' AND momentum_rank IS NOT NULL
               GROUP BY generated_at::date) b ON p.generated_at = b.latest
-        WHERE p.horizon = '5d' AND p.momentum_rank IS NOT NULL
+        WHERE p.horizon = '21d'
     """)
     preds = pd.DataFrame(cur.fetchall())
-    cur.execute("SELECT batch_date, horizon_days FROM headline_hit_rates")
-    done = {(r['batch_date'], r['horizon_days']) for r in cur.fetchall()}
+    cur.execute("SELECT batch_date, horizon_days, ranking FROM headline_hit_rates")
+    done = {(r['batch_date'], r['horizon_days'], r['ranking']) for r in cur.fetchall()}
     cur.close()
     if preds.empty:
         return 0
@@ -409,9 +421,12 @@ def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
     written = 0
     for gen_at, batch in preds.groupby('generated_at'):
         batch_date = pd.Timestamp(gen_at).date()
-        todo = [h for h in horizons if (batch_date, h) not in done]
+        rankings = [k for k, col in RANKINGS.items() if batch[col].notna().any()]
+        todo = [h for h in horizons if any((batch_date, h, k) not in done for k in rankings)]
         if not todo:
             continue
+        high = batch['high_confidence'].dropna()
+        high = bool(high.iloc[0]) if len(high) else None
         tickers = batch['ticker'].tolist()
         prices = load_price_around(conn, tickers + ['NIFTY50'], batch_date - timedelta(days=7),
                                    batch_date + timedelta(days=2 * max(todo) + 14))
@@ -428,43 +443,55 @@ def evaluate_headline_hits(conn, horizons=HEADLINE_HORIZONS):
             for r in batch.itertuples(index=False):
                 base, end = get_nth_trading_day_price(pivot, r.ticker, batch_date, n=h)
                 if base is not None:
-                    rows.append({'ticker': r.ticker, 'rank': r.momentum_rank, 'excess': np.log(end / base) - nifty_ret})
+                    rows.append({'ticker': r.ticker, 'momentum': r.momentum_rank, 'blend': r.blend_rank,
+                                 'excess': np.log(end / base) - nifty_ret})
             frame = pd.DataFrame(rows)
             if len(frame) < 2 * TOP_N:
                 continue
-            top = frame.sort_values(['rank', 'ticker']).head(TOP_N)['excess'].mean()
             avg = frame['excess'].mean()
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO headline_hit_rates (batch_date, horizon_days, generated_at, stocks, top20_excess,
-                                                avg_excess, beat_average, beat_nifty)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (batch_date, horizon_days) DO NOTHING
-            """, (batch_date, h, gen_at, len(frame), float(top), float(avg), int(top > avg), int(top > 0)))
-            conn.commit()
-            cur.close()
-            written += 1
+            for ranking in rankings:
+                if (batch_date, h, ranking) in done:
+                    continue
+                ranked = frame.dropna(subset=[ranking])
+                top = ranked.sort_values([ranking, 'ticker']).head(TOP_N)['excess'].mean()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO headline_hit_rates (batch_date, horizon_days, ranking, generated_at, stocks,
+                                                    top20_excess, avg_excess, beat_average, beat_nifty, high_confidence)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (batch_date, horizon_days, ranking) DO NOTHING
+                """, (batch_date, h, ranking, gen_at, len(frame), float(top), float(avg), int(top > avg),
+                      int(top > 0), high if ranking == 'blend' else None))
+                conn.commit()
+                cur.close()
+                written += 1
     return written
 
 
 def print_headline_report(conn):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
-        SELECT horizon_days, COUNT(*) AS batches, AVG(beat_average::float) AS beat_avg,
+        SELECT horizon_days, ranking, 'all days' AS days, COUNT(*) AS batches, AVG(beat_average::float) AS beat_avg,
                AVG(beat_nifty::float) AS beat_nifty, AVG(top20_excess - avg_excess) AS edge
-        FROM headline_hit_rates GROUP BY horizon_days ORDER BY horizon_days
+        FROM headline_hit_rates GROUP BY horizon_days, ranking
+        UNION ALL
+        SELECT horizon_days, ranking, 'high confidence', COUNT(*), AVG(beat_average::float),
+               AVG(beat_nifty::float), AVG(top20_excess - avg_excess)
+        FROM headline_hit_rates WHERE ranking = 'blend' AND high_confidence GROUP BY horizon_days, ranking
+        ORDER BY 1, 2, 3
     """)
     rows = cur.fetchall()
     cur.close()
-    print("\n  HEADLINE: how often the top 20 momentum picks beat the market (live)")
+    print("\n  HEADLINE: how often the top 20 picks beat the market (live)")
     if not rows:
         print("  No batch has completed its horizon yet.")
-        return
-    print(f"  {'Horizon':<10} {'Batches':>8} {'Beat avg stock':>15} {'Beat NIFTY':>11} {'Avg edge':>9}")
-    for r in rows:
-        print(f"  {str(r['horizon_days']) + ' days':<10} {r['batches']:>8} {r['beat_avg']:>15.1%} "
-              f"{r['beat_nifty']:>11.1%} {r['edge'] * 100:>8.2f}%")
-    print("  Backtest reference, 2021-2026: 21 days beat the average stock 65%, the NIFTY 69% of start days.")
+    else:
+        print(f"  {'Horizon':<9} {'Ranking':<10} {'Days':<16} {'Batches':>8} {'Beat avg stock':>15} {'Beat NIFTY':>11} {'Avg edge':>9}")
+        for r in rows:
+            print(f"  {str(r['horizon_days']) + ' days':<9} {r['ranking']:<10} {r['days']:<16} {r['batches']:>8} "
+                  f"{r['beat_avg']:>15.1%} {r['beat_nifty']:>11.1%} {r['edge'] * 100:>8.2f}%")
+    print("  Walk-forward reference (Mar 2025 to Sep 2026, 21 days, blend): beat the NIFTY 68% of days, 74% on")
+    print("  high-confidence days; forecast band coverage 80-83%. Results: results/confidence_study/.")
 
 
 # ─── DB Write ─────────────────────────────────────────────────────────────────
