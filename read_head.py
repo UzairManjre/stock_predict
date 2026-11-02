@@ -1,8 +1,9 @@
 
+import os
 import pandas as pd
 import ast
 
-df = pd.read_csv("D:\\IMP\\NEED MONEY THINGS\\stock_predict\\data\\market_data_20250920_222108\\summary\\complete_market_data.csv", nrows=0)
+df = pd.read_csv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "market_data_20250920_222108", "summary", "complete_market_data.csv"), nrows=0)
 stocks = set()
 for col_str in df.columns:
     try:

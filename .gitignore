@@ -34,3 +34,10 @@ catboost_info/
 
 # Live-tracking run logs
 logs/
+
+# Created by setup.ps1: portable PostgreSQL (binaries + database) and the download cache
+postgres/
+downloads/
+
+# Report build dependencies
+node_modules/

@@ -281,7 +281,7 @@ def save_to_postgres(ticker, announcements):
         print(f"⚠️ Warning: Could not save announcements to PostgreSQL: {e}")
 
 def main():
-    base_dir = r'd:\IMP\NEED MONEY THINGS\stock_predict' 
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
     stock_map_file = os.path.join(base_dir, 'stock_map.csv')
     data_dir = os.path.join(base_dir, 'data', 'market_data_20250920_225539', 'individual_data')
     debug_dir = os.path.join(base_dir, 'debug_output')

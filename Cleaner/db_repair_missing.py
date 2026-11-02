@@ -5,7 +5,7 @@ import sys
 from SentimentAnalyzer import extract_text_from_pdf, analyze_sentiment_retail, analyze_sentiment_pro, hybrid_decision
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'stock_data.db')
-DATA_ROOT = r'd:\IMP\NEED MONEY THINGS\stock_predict\data\market_data_20250920_225539\individual_data'
+DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'market_data_20250920_225539', 'individual_data')
 
 def repair_missing_sentiment():
     conn = sqlite3.connect(DB_PATH)

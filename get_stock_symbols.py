@@ -1,5 +1,6 @@
 
 
+import os
 import pandas as pd
 import ast
 
@@ -16,7 +17,7 @@ def get_stock_symbols(file_path):
     return list(stocks)
 
 if __name__ == "__main__":
-    file_path = "D:\\IMP\\NEED MONEY THINGS\\stock_predict\\data\\market_data_20250920_222108\\summary\\complete_market_data.csv"
+    file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "market_data_20250920_222108", "summary", "complete_market_data.csv")
     symbols = get_stock_symbols(file_path)
     print(symbols)
 

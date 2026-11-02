@@ -8,7 +8,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'stock_data.db')
 ANN_CSV = os.path.join(os.path.dirname(__file__), 'all_announcements_with_sentiment.csv')
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'stock_data.db')
-DATA_ROOT = r'd:\IMP\NEED MONEY THINGS\stock_predict\data\market_data_20250920_225539\individual_data'
+DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'market_data_20250920_225539', 'individual_data')
 
 # Helper to parse date
 parse_date = lambda d: datetime.strptime(d, '%Y-%m-%d') if '-' in d else d

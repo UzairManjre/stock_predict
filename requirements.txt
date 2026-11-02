@@ -1,3 +1,10 @@
+# Python 3.10 (tested; 3.11 and 3.12 should also work).
+# Easiest: run setup.ps1, which installs everything below. By hand:
+#   1. Install PyTorch 2.5.1 from the PyTorch index first: the CUDA 12.1 build for an NVIDIA GPU,
+#      or the CPU build otherwise (plain PyPI does not have the CUDA build):
+#        pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#        pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+#   2. pip install -r requirements.txt
 aiohappyeyeballs==2.6.2
 aiohttp==3.14.1
 aiosignal==1.4.0
@@ -113,7 +120,7 @@ python-multipart==0.0.32
 pytorch-forecasting==1.7.0
 pytorch-lightning==2.6.5
 pytz==2026.2
-pywin32==312
+pywin32==312; sys_platform == "win32"
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2026.5.9
@@ -142,7 +149,7 @@ threadpoolctl==3.6.0
 tokenizers==0.22.2
 toml==0.10.2
 tomli==2.4.1
-torch==2.5.1+cu121
+torch==2.5.1
 torchmetrics==1.9.0
 tqdm==4.68.1
 transformers==5.10.2
@@ -154,6 +161,7 @@ typing_extensions==4.15.0
 tzdata==2026.2
 urllib3==2.7.0
 uvicorn==0.49.0
+vaderSentiment==3.3.2
 waitress==3.0.2
 watchdog==6.0.0
 wcwidth==0.8.1

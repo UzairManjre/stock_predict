@@ -106,7 +106,7 @@ def generate_stock_map_from_api(data_dir, bhavcopy_lookup, output_csv_path):
         print("\nNo stock data was found to write to the CSV file.")
 
 if __name__ == '__main__':
-    base_dir = r'd:\IMP\NEED MONEY THINGS\stock_predict'
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
     data_dir_to_scan = os.path.join(base_dir, 'data', 'market_data_20250920_225539', 'individual_data')
     
     # Using the path you specified

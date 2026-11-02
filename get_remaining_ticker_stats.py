@@ -1,5 +1,5 @@
 import sys, os
-sys.path.append(os.path.abspath('d:\\IMP\\NEED MONEY THINGS\\stock_predict'))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from Scaper.utils.db_connector import get_db_connection
 
 conn = get_db_connection()

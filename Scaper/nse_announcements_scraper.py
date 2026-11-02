@@ -253,7 +253,7 @@ async def process_symbol(symbol, idx, total, individual_data_dir, page, semaphor
         await asyncio.sleep(1)
 
 async def async_main():
-    base_dir = r'd:\IMP\NEED MONEY THINGS\stock_predict'
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
     
     # 1. Resolve target directory
     session_dir = get_latest_market_data_dir(base_dir)
